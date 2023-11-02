@@ -1,0 +1,672 @@
+---
+title: "Bogotá - Modelos"
+output: 
+  html_document:
+    standalone: true
+    smart: true
+    normalize: true
+    toc: true
+    highlight: tango
+    self-contained: true
+    theme: cerulean
+  pdf_document:
+    toc: true
+    highlight: tango
+always_allow_html: true
+vignette: >
+  %\VignetteIndexEntry{Bogotá - Modelos}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+require(test2021)
+```
+
+**Autor**: David Humberto Cardenas Pineda.
+
+**Versión**: 2.0.
+
+**Fecha de versión:** Agosto 2021.
+
+# Exploración de modelos predictivos para delitos - Bogotá
+
+La presente viñeta esta destinada a mostrar el desempeño de una serie de modelos
+predictivos para análisis de diferentes delitos en la ciudad de 
+Bogotá. Para ello se hace uso de la base de datos de la Secretaría de Seguridad
+y Justicia del Distrito quienes mediante la plataforma institucional brindan
+acceso a las estadísticas de crímenes de alto impacto que han sucedido entre
+enero de 2010 y junio de 2021 (hasta la fecha de realización de este documento).
+La base de datos puede ser consultada en el siguiente (enlace)[https://scj.gov.co/es/oficina-oaiee/estadisticas-mapas].
+
+## Descripción y tratamiento de la base de datos
+
+Los reportes originales contienen los siguientes campos
+
+* Nombre de la localidad y UPZ donde se reportaron los incidentes.
+* Tipo de delito.
+* Vehículo (con que arma fue cometido, si aplica) fue cometido el delito.
+* Modo de ejecución del delito.
+* Fecha y campos derivados de esta como año, mes, día de la semana y rango del día.
+* Sexo de la persona que reporta.
+* Número de hechos reportados (dentro de un mismo delito).
+
+Se comienza delimitando el desarrollo de este problema a la Bogotá urbana, 
+excluyendo todos los reportes provenientes de la localidad de Sumapaz y las
+UPR que fueron incluidas como UPZ dentro de los informes obtenidos. Además,
+como la finalidad de los modelos es requerir la menor cantidad de información
+posible por parte del usuario dentro de lo razonable, se descartan
+los campos de vehículo y modo a consideración subjetiva del autor que parte
+de suponer que dichas variables entorpecen la interacción y son de mayor relevancia
+como *pronosticó*, lo cual excede los alcances de los desarrollos iniciales
+de este documento (clasificación multivariada).
+
+En este punto, los modelos a proponer se alimentarían de toda la 
+información disponible devolviendo un pronostico de cantidad ocurrencias
+de un delito especifico o la posibilidad de que suceda, de acuerdo
+a la UPZ a visitar, el día y el rango horario en que esta ocurre, además
+del sexo del individuo consultante. 
+
+Por experimentos previos se encontró que ciertos modelos, como `randomForest`, 
+necesitan de grandes cantidades de memoria virtual y no puede ser distribuidos 
+en múltiples procesadores por la definición de su algoritmo. Además,
+aquellos modelos destinados a predecir la cantidad de hechos reportados
+evidenciaron un aporte informativo bajo al análisis si este se realizaba al
+nivel de UPZ y día.
+
+Como solución al problema anterior se agregó la información a niveles de 
+localidad y rango horario, eliminando los campos de UPZ y sexo en el proceso. 
+Acompañado de este tratamiento, se asume un registro perfecto de la información 
+siendo entonces posible la adición de ceros en los tiempos y localizaciones no 
+registradas en la base original, considerando que en ella se almacenan
+exclusivamente las ocurrencias. Por otro lado, se agregan $k=30$ rezagos de la 
+variable de conteos para los modelos
+
+Con las siguientes lineas de código se obtiene el procesamiento mencionado.
+El archivo principal esta pendiente por ser anexado dentro del paquete
+
+```{r funciones, warning=FALSE, message=FALSE}
+require(test2021)
+proc_bogota <- function(base, delito = siedco_wc$Delito, type = c("reg","clsf"),
+                        fill_zero = if(type == "clsf") TRUE else FALSE,
+                        n_class = if(type == "reg") NULL else 2,
+                        n_lag = 30){
+  delito <- match.arg(delito)
+  type <- match.arg(type)
+  if(all(c("LNG","LAT") %in% names(base)))
+    base <- base[,-c("LNG","LAT")]
+  base_f <- base %>%
+    dplyr::filter(Delito == delito) %>%
+    subset(select = -c(NOM_DIV1,NOM_DIV2,Delito))
+  names(base_f) <- gsub(" ","_",iconv(toupper(names(base_f)),to = "UTF-8"))
+  base_pred <- subset(base_f,
+                      select = c(NUMERO_HECHOS,FECHA,CODIGO_DIV1)) # Incluir aca RANG_DIA... una proxima
+  base_pred[,NUMERO_HECHOS := sum(NUMERO_HECHOS),
+            .(FECHA,CODIGO_DIV1)] # Incluir aca RANG_DIA... una proxima
+  base_pred <- unique(base_pred)
+  base_pred$y <- base_pred$NUMERO_HECHOS
+  base_pred$NUMERO_HECHOS <- NULL
+  if(fill_zero)
+    base_pred <- fill_long(base_pred$y,
+                           base_pred[,-"y"],"FECHA")
+  base_pred <- as.data.frame(base_pred)
+  base_pred <- add_date_split(base_pred,"FECHA",rm_date = FALSE)
+  base_pred$ANNO <- as.numeric(base_pred$ANNO)
+  base_list <- test2021::split_by_factors(base_pred,factor_split = "CODIGO_DIV1") # Incluir aca RANG_DIA... una proxima
+  if(fill_zero)
+   base_list <- lapply(base_list, function(x) add_laggs(x,x$y,n_lag))
+  base_pred <- dplyr::bind_rows(base_list)
+  if(type == "clsf"){
+    if(n_class == 2){
+      temp <- test2021::num2ctgr(base_pred$y,"subjective",breaks=c(0,0.5,max(base_pred$y)))
+      base_pred$y <- test2021::ctgr2nmd(temp,c("NO","SI"))
+    }
+    if(n_class == 3){
+      temp <- test2021::num2ctgr(base_pred$y,"subjective",
+                                 breaks=c(0,0.5,quantile(base_pred$y,0.75),max(base_pred$y)))
+      base_pred$y <- test2021::ctgr2nmd(temp,c("NINGUNO","MODERADO","ALTO"))
+    }    
+  }
+  base_pred
+}
+```
+
+## Modelos de regresión
+
+Mediante la siguiente instrucción se crean los modelos de regresión para todos
+los delitos disponibles. Se aclara que el resultado final NO SE INCLUYE en el
+paquete por su gran peso (inclusive comprimido) de 100 MB. Se espera reducir
+su tamaño en un futuro con un filtrado a los delitos presentados, pero de momento
+el código es suficiente para replicar su elaboración.
+
+Entre los modelos probados esta el lineal, las combinaciones de lineal y ARIMA, y
+redes neuronales. Se descarto el uso de ARIMAX por la experiencia previa con los modelos
+de regresión usados para la predicción de robos de bicicletas en Londres.
+
+```{r reg, eval=FALSE}
+# Semilla
+set.seed(100)
+# Lista de delitos
+delitos <- unique(siedco_wc$Delito)
+# Loop para buscar los mejores modelos
+list_bogota_reg <- lapply(delitos,function(x){
+  bd <- proc_bogota(siedco_wc, x, "reg",TRUE)
+  temp_split <- create_split_long(Y = bd$y,
+                    X = subset(bd,select = -y),
+                    factors = c("CODIGO_DIV1"),
+                    split_prop = c(0.7,0.15,0.15))
+  reg_models(split_out = temp_split,
+             factor_split = c("CODIGO_DIV1"),
+             models = c("linear","arima_linear","linear_arima", 
+                         "arima", "nn_1hl","nn_2hl", "nn_3hl"),
+             dates_col = "FECHA",
+             save_obj = F,
+             only_best = T,
+             quiet = TRUE)
+  })
+names(list_bogota_reg) <- delitos
+#saveRDS(list_bogota_reg,paste0(PATH,"/bogota_reg.rds"))
+```
+
+En adición a los modelos anteriores, se contemplo el uso de la redes neuronales
+Long Short Term Memory como alternativa adicional a los modelos usados
+en principio dentro del paquete. Se omiten los detalles de la configuración
+de las entradas de la red y de su ajuste.
+
+## Modelos de regresión sin ceros
+
+En esta variante se elimina la adición de ceros al modelo, con lo cual se
+reduce la cantidad de modelos que se pueden optar, siendo estos lineal y
+redes neuronales. 
+
+Durante el ajuste de los modelos se encontró que en algunos casos la información 
+por sector no esta bien representada en entrenamiento y validación, con lo cual
+no se puede alimentar las rutinas automáticas para la obtención de modelos
+y es necesario un tratamiento individual.
+
+```{r reg_zero, eval=FALSE}
+# Semilla
+set.seed(100)
+# Lista de delitos
+delitos <- unique(siedco_wc$Delito)
+# Loop para buscar los mejores modelos
+list_bogota_reg_nzeros <- lapply(delitos,function(x){
+  bd <- proc_bogota(siedco_wc, x, "reg")
+  temp_split <- create_split_long(Y = bd$y,
+                    X = subset(bd,select = -y),
+                    factors = c("CODIGO_DIV1"),
+                    split_prop = c(0.7,0.15,0.15))
+  tryCatch(expr = {
+    reg_models(split_out = temp_split,
+                                                          factor_split = c("CODIGO_DIV1"),
+                                                          models = c("linear", "nn_1hl", "nn_2hl"),
+                                                          dates_col = "FECHA",
+                                                          save_obj = F,
+                                                          only_best = T,
+               quiet = TRUE)
+  }, error = function(e) 
+    tryCatch({
+        bd <- proc_bogota(siedco_wc, x, "reg")
+        temp_split <- create_split_ts(Y = bd$y,
+                        X = subset(bd,select = -y),
+                        split_prop = c(0.7,0.15,0.15))
+        reg_models(split_out = temp_split,
+                   factor_split = c("CODIGO_DIV1"),
+                   models = c("linear", "nn_1hl", "nn_2hl"),
+                   dates_col = "FECHA",
+                   save_obj = F,
+                   only_best = T,
+                   quiet = TRUE)
+    }, error = function(g) return(NULL))
+  )
+})
+names(list_bogota_reg_nzeros) <- delitos
+#saveRDS(list_bogota_reg_nzeros,paste0(PATH,"/bogota_reg_nzeros.rds"))
+```
+
+## Modelos de clasificación dos clases
+
+Para el problema de clasificación se consideraron dos categorías *SI* y *NO*,
+la primera asignada a recuentos de hechos iguales o superiores a uno y la
+segunda para los ceros. Se justifica el uso de dos clases por la desproporción
+de ceros en la base de datos además de simplificar la interpretación de los 
+resultados por parte del usuario.
+
+Al igual que en regresión los modelos no se incluyen dentro del paquete por
+ser demasiado pesados (360 MB), además, estos se limitaron a Naive Bayes, Random 
+Forest y redes neuronales. Los modelos multinomiales fueron descartados a favor
+de las redes neuronales, considerando que el primero termina siendo una red
+neuronal sin capas ocultas para clasificación binaría (regresión logística).
+Las SVM fueron ignoradas por la mala implementación de la rutina de optimización
+de parámetros y las experiencias obtenidas en los ejercicios en Londres.
+Finalmente, los arboles de decisión CRAN se descartaron por la presencia de
+sus versiones de ensamble (Random Forest).
+
+```{r clsf, eval=FALSE}
+# Semilla
+set.seed(100)
+# Clsf
+delitos <- unique(siedco_wc$Delito)
+#names(list_splits_bogota_reg) <- delitos
+list_bogota_clsf <- lapply(delitos,function(x){
+  bd <- proc_bogota(siedco_wc, x, "clsf")
+  temp_split <- create_split_long(Y = bd$y,
+                    X = subset(bd,select = -y),
+                    factors = c("CODIGO_DIV1"),
+                    split_prop = c(0.7,0.15,0.15))
+  clsf_models(split_out = temp_split,
+                                                         factor_split = c("CODIGO_DIV1"),
+                                                         models = c("naive_bayes", 
+                                                                    "random_forest", "nn_1hl", "nn_2hl"),
+                                                         dates_col = "FECHA",
+                                                         save_obj = F,
+              only_best = TRUE)
+  })
+names(list_bogota_clsf) <- delitos
+saveRDS(list_bogota_clsf,paste0(PATH,"/bogota_clsf.rds"))
+```
+
+## Modelos de clasificación tres clases
+
+Ahora se consideran tres categorías *NINGUNO*, *MODERADO* y *ALTO*.
+La primera asignada a las cero ocurrencias, la segunda entre una ocurrencia hasta
+el percentil 75 de todos los reportes y la tercera corresponde a las cantidades 
+por fuera de las dos categorías previas. El uso de tres categorías se realiza
+como alternativa a la representación dicotómica .
+
+```{r clsf_2, eval=FALSE}
+# Semilla
+set.seed(100)
+# Clsf
+delitos <- unique(siedco_wc$Delito)
+#names(list_splits_bogota_reg) <- delitos
+list_bogota_clsf_3l <- lapply(delitos,function(x){
+  tryCatch({bd <- proc_bogota(siedco_wc, x, "clsf",TRUE,3)
+            temp_split <- create_split_long(Y = bd$y,
+                              X = subset(bd,select = -y),
+                              factors = c("CODIGO_DIV1"),
+                              split_prop = c(0.7,0.15,0.15))
+            clsf_models(split_out = temp_split,
+                        factor_split = c("CODIGO_DIV1"),
+                        models = c("naive_bayes","random_forest", "nn_1hl", "nn_2hl"),
+                        dates_col = "FECHA",
+                        save_obj = F,
+                        only_best = TRUE)
+          }, error = function(e) return(NULL))
+})
+names(list_bogota_clsf_3l) <- delitos
+saveRDS(list_bogota_clsf_3l,paste0(PATH,"/bogota_clsf_3l.rds"))
+```
+
+
+## Resumenes de rendimiento
+
+Para obtener las medidas de rendimiento se debe reconstruir las particiones 
+de los datos lo cual se realiza en el siguiente código en adición al computo
+de las métricas.
+
+### Resultados de regresiones
+
+
+```{r reg_met, eval=FALSE}
+# Lista de delitos
+delitos <- unique(siedco_wc$Delito)
+list_splits_bogota_reg <- lapply(delitos, function(x){
+  bd <- bd <- proc_bogota(siedco_wc, x, "reg",TRUE)
+  create_split_long(Y = bd$y,
+                    X = subset(bd,select = -y),
+                    factors = c("CODIGO_DIV1"),
+                    split_prop = c(0.7,0.15,0.15))
+})
+names(list_splits_bogota_reg) <- delitos
+train_rmse <- sapply(delitos,function(x) 
+  reg_metrics(list_bogota_reg[[x]],list_splits_bogota_reg[[x]],
+              objective = "train", dates_col = "FECHA",
+              factor_split = "CODIGO_DIV1"))
+val_rmse <- sapply(delitos,function(x) 
+  reg_metrics(list_bogota_reg[[x]],list_splits_bogota_reg[[x]],
+              objective = "validation", dates_col = "FECHA",
+              factor_split = "CODIGO_DIV1"))
+results <- data.frame(Delito = delitos,train = train_rmse, sd_y_train = sapply(list_splits_bogota_reg, function(x) sd(x$Y$Y_train)),mean_y_train = sapply(list_splits_bogota_reg, function(x) mean(x$Y$Y_train)),cv_y_train = sapply(list_splits_bogota_reg, function(x) 100*sd(x$Y$Y_train)/mean(x$Y$Y_train)),val = val_rmse, sd_y_val = sapply(list_splits_bogota_reg, function(x) sd(x$Y$Y_val)),mean_y_val = sapply(list_splits_bogota_reg, function(x) mean(x$Y$Y_val)),cv_y_val = sapply(list_splits_bogota_reg, function(x) 100*sd(x$Y$Y_val)/mean(x$Y$Y_val)))
+rownames(results) <- NULL
+saveRDS(results,paste0(PATH,"/tabla_bog_reg.rds"))
+```
+
+```{r reg_table_1, echo=FALSE}
+PATH <- "D:/R_projects/r_packages/path/work_pkg/test2021/vignettes/tables"
+tabla_reg<-readRDS(paste0(PATH,"/tabla_bog_reg.rds"))
+names(tabla_reg) <- c("Delito","Train RMSE","Train SD","Train Mean", "Train CV","Val RMSE","Val SD","Val Mean", "Val CV")
+tabla_reg <- tabla_reg[complete.cases(tabla_reg),]
+knitr::kable(tabla_reg, digits = 2, row.names = FALSE)
+```
+
+La siguiente tabla muestra los resultados de la redes LSTM
+
+```{r reg_table_2, echo=FALSE}
+PATH <- "D:/R_projects/r_packages/path/work_pkg/test2021/vignettes/tables"
+tabla_lstm<-readRDS(paste0(PATH,"/tabla_bog_reg_lstm.rds"))
+tabla_lstm <- tabla_lstm %>%
+  as.data.frame() %>%
+  dplyr::mutate(Delito = rownames(.))
+tabla_lstm <- tabla_lstm[,c(9,1:8)]
+rownames(tabla_lstm) <- NULL
+names(tabla_lstm) <- c("Delito","Train RMSE","Train SD","Train Mean", "Train CV","Val RMSE","Val SD","Val Mean", "Val CV")
+tabla_lstm <- tabla_lstm[complete.cases(tabla_lstm),]
+knitr::kable(tabla_lstm, digits = 2, row.names = FALSE)
+```
+
+Nuevamente, estos son los resultados para LSTM donde se aplica
+una primer diferencia antes de entrar al modelo
+
+```{r reg_table_3, echo=FALSE}
+PATH <- "D:/R_projects/r_packages/path/work_pkg/test2021/vignettes/tables"
+tabla_lstm<-readRDS(paste0(PATH,"/tabla_bog_reg_lstm_diff.rds"))
+tabla_lstm <- tabla_lstm %>%
+  as.data.frame() %>%
+  dplyr::mutate(Delito = rownames(.))
+tabla_lstm <- tabla_lstm[,c(9,1:8)]
+rownames(tabla_lstm) <- NULL
+names(tabla_lstm) <- c("Delito","Train RMSE","Train SD","Train Mean", "Train CV","Val RMSE","Val SD","Val Mean", "Val CV")
+tabla_lstm <- tabla_lstm[complete.cases(tabla_lstm),]
+knitr::kable(tabla_lstm, digits = 2, row.names = FALSE)
+```
+
+### Resultados de regresiones sin ceros
+
+```{r reg_met2, eval=FALSE}
+# Lista de delitos
+delitos <- unique(siedco_wc$Delito)
+list_splits_bogota_reg <- lapply(delitos, function(x){
+  bd <- proc_bogota(siedco_wc, x, "reg")
+  create_split_long(Y = bd$y,
+                    X = subset(bd,select = -y),
+                    factors = c("CODIGO_DIV1"),
+                    split_prop = c(0.7,0.15,0.15))
+})
+names(list_splits_bogota_reg) <- delitos
+delitos_2 <- delitos[!sapply(list_bogota_reg_nzeros,is.null)]
+train_rmse <- sapply(delitos_2,function(x) 
+  reg_metrics(list_bogota_reg_nzeros[[x]],list_splits_bogota_reg[[x]],
+              objective = "train"))
+val_rmse <- sapply(delitos_2,function(x) 
+  reg_metrics(list_bogota_reg_nzeros[[x]],list_splits_bogota_reg[[x]],
+              objective = "validation"))
+results <- data.frame(Delito = delitos_2,train = train_rmse, sd_y_train = sapply(delitos_2, function(x) sd(list_splits_bogota_reg[[x]]$Y$Y_train)), mean_y_train = sapply(delitos_2, function(x) mean(list_splits_bogota_reg[[x]]$Y$Y_train)),cv_y_train = sapply(delitos_2, function(x) 100*sd(list_splits_bogota_reg[[x]]$Y$Y_train)/mean(list_splits_bogota_reg[[x]]$Y$Y_train)),val = val_rmse, sd_y_val = sapply(delitos_2, function(x) sd(list_splits_bogota_reg[[x]]$Y$Y_val)),mean_y_val = sapply(delitos_2, function(x) mean(list_splits_bogota_reg[[x]]$Y$Y_val)),cv_y_val = sapply(delitos_2, function(x) 100*sd(list_splits_bogota_reg[[x]]$Y$Y_val)/mean(list_splits_bogota_reg[[x]]$Y$Y_val)),)
+rownames(results) <- NULL
+saveRDS(results,paste0(PATH,"/tabla_bog_reg_zero.rds"))
+```
+
+```{r reg_table_4, echo=FALSE}
+PATH <- "D:/R_projects/r_packages/path/work_pkg/test2021/vignettes/tables"
+tabla_reg<-readRDS(paste0(PATH,"/tabla_bog_reg_zero.rds"))
+names(tabla_reg) <- c("Delito","Train RMSE","Train SD","Train Mean","Train CV","Val RMSE","Val SD","Val Mean","Val CV")
+knitr::kable(tabla_reg, digits = 2, row.names = FALSE)
+```
+
+### Resultados de clasificadores
+
+```{r clsf_met, eval=FALSE}
+# Lista de delitos
+delitos <- unique(siedco_wc$Delito)
+list_splits_bogota_clsf <- lapply(delitos, function(x){
+  bd <- proc_bogota(siedco_wc, x, "clsf")
+  create_split_long(Y = bd$y,
+                    X = subset(bd,select = -y),
+                    factors = c("CODIGO_DIV1"),
+                    split_prop = c(0.7,0.15,0.15))
+})
+names(list_splits_bogota_clsf) <- delitos
+train_clsf <- sapply(delitos,function(x) 
+  clsf_metrics(list_bogota_clsf[[x]],list_splits_bogota_clsf[[x]],
+              objective = "train",metrics_out = "accuracy"))
+val_clsf <- sapply(delitos,function(x) 
+  clsf_metrics(list_bogota_clsf[[x]],list_splits_bogota_clsf[[x]],
+              objective = "validation",metrics_out = "accuracy"))
+train_clsf_micro <- lapply(delitos,function(x) 
+  clsf_metrics(list_bogota_clsf[[x]],list_splits_bogota_clsf[[x]],
+              objective = "train",metrics_out = "micro_precision")) %>%
+  dplyr::bind_rows() 
+val_clsf_micro <- lapply(delitos,function(x) 
+  clsf_metrics(list_bogota_clsf[[x]],list_splits_bogota_clsf[[x]],
+              objective = "validation",metrics_out = "micro_precision")) %>%
+  dplyr::bind_rows() 
+results <- data.frame(Delito = delitos,train_acc = train_clsf, 
+                      train_clsf_micro,val_acc = val_clsf,val_clsf_micro)
+rownames(results) <- NULL
+results[is.na(results)] <- 0
+saveRDS(results,paste0(PATH,"/tabla_bog_clsf.rds"))
+```
+
+```{r clsf_table, echo=FALSE}
+tabla_clsf<-readRDS(paste0(PATH,"/tabla_bog_clsf.rds"))
+names(tabla_clsf) <- c("Delito", "Train Acc", "Train MP NO", "Train MP SI",
+                       "Val Acc", "Val MP NO", "Val MP SI")
+knitr::kable(tabla_clsf, digits = 3, row.names = FALSE)
+```
+
+### Resultados de clasificadores para 3 clases
+
+```{r clsf_met_3cl, eval=FALSE}
+# Lista de delitos
+delitos <- unique(siedco_wc$Delito)
+list_splits_bogota_clsf <- lapply(delitos, function(x){
+  tryCatch({bd <- proc_bogota(siedco_wc, x, "clsf",TRUE,3)
+  create_split_long(Y = bd$y,
+                    X = subset(bd,select = -y),
+                    factors = c("CODIGO_DIV1"),
+                    split_prop = c(0.7,0.15,0.15))},
+                   error = function(e) return(NULL))
+})
+names(list_splits_bogota_clsf) <- delitos
+delitos_2 <- delitos[!sapply(list_bogota_clsf_3l,is.null)]
+train_clsf <- sapply(delitos_2,function(x) 
+  clsf_metrics(list_bogota_clsf_3l[[x]],list_splits_bogota_clsf[[x]],
+              objective = "train",metrics_out = "accuracy"))
+val_clsf <- sapply(delitos_2,function(x) 
+  clsf_metrics(list_bogota_clsf_3l[[x]],list_splits_bogota_clsf[[x]],
+              objective = "validation",metrics_out = "accuracy"))
+train_clsf_micro <- lapply(delitos_2,function(x) 
+  clsf_metrics(list_bogota_clsf_3l[[x]],list_splits_bogota_clsf[[x]],
+              objective = "train",metrics_out = "micro_precision")) %>%
+  dplyr::bind_rows() 
+val_clsf_micro <- lapply(delitos_2,function(x) 
+  clsf_metrics(list_bogota_clsf_3l[[x]],list_splits_bogota_clsf[[x]],
+              objective = "validation",metrics_out = "micro_precision")) %>%
+  dplyr::bind_rows() 
+results <- data.frame(Delito = delitos_2,train_acc = train_clsf, 
+                      train_clsf_micro,val_acc = val_clsf,val_clsf_micro)
+rownames(results) <- NULL
+results[is.na(results)] <- 0
+saveRDS(results,paste0(PATH,"/tabla_bog_clsf_3l.rds"))
+```
+
+```{r clsf_table_2, echo=FALSE}
+tabla_clsf_3l <-readRDS(paste0(PATH,"/tabla_bog_clsf_3l.rds"))
+names(tabla_clsf_3l) <- c("Delito", "Train Acc", "Train MP NINGUNO", "Train MP MODERADO",
+                       "Train MP ALTO", "Val Acc", "Val MP NINGUNO", "Val MP MODERADO",
+                       "Val MP ALTO")
+knitr::kable(tabla_clsf_3l, digits = 3, row.names = FALSE)
+```
+
+## Validación de modelos
+
+En esta sección se examinan algunos modelos de regresión y clasificación 
+mediante técnicas de validación cruzada especial para series de tiempo que
+mueven el conjunto de entrenamiento y validación en el tiempo. Acá 
+se usará la versión de ventana móvil, la cual consiste en tomar *n* periodos
+contiguos para entrenamiento e ir moviendo la ventana desde el inició hasta
+el fin de la serie con el fin de evaluar la robustez de los modelos ante
+tendencias en reportes de delitos, ya sea de baja o alza.
+
+PRUEBAS: De momento se usa con una shallow network (2 capas) para mostrar su
+uso.
+
+```{r vali_1, eval=FALSE, echo=FALSE}
+### Prompt
+set.seed(100)
+acc_res <- list() 
+delitos <- unique(siedco_wc$Delito)
+for(delito in delitos){
+  bd <- proc_bogota(siedco_wc, delito, "clsf")
+  temp_split <- create_split_long(Y = bd$y,
+                    X = subset(bd,select = -y),
+                    factors = c("CODIGO_DIV1"),
+                    split_prop = c(0.7,0.15,0.15))
+  horizonte_train <- 3*(max(temp_split$X$X_train$FECHA)-min(temp_split$X$X_train$FECHA))/4
+  cv_options <- rolling_cv(temp_split$Y$Y_train, temp_split$X$X_train, 
+                        dates_col = "FECHA", ceiling(horizonte_train), 360)
+  acc_num <- numeric()
+  for(i in 1:length(cv_options$train)){
+    prueba <- list()
+    prueba$X$X_train <- temp_split$X$X_train[cv_options$train[[i]],]
+    prueba$Y$Y_train <- temp_split$Y$Y_train[cv_options$train[[i]]]
+    prueba$X$X_val <- temp_split$X$X_train[cv_options$val[[i]],]
+    prueba$Y$Y_val <- temp_split$Y$Y_train[cv_options$val[[i]]]
+    acc_num[i] <- tryCatch(nn_2hl(prueba,quiet = T,tuning = T)$acc_val,
+                           error = function(e) return(NA))
+  }
+  acc_res[[delito]] <- acc_num
+}
+### Tabla
+names(acc_res) <- delitos
+tbl_cv_2hl <- acc_res %>%
+  lapply(function(x) c(mean(x),sd(x),min(x),max(x))) %>%
+  do.call(rbind,.) 
+names(tbl_cv_2hl) <- c("Media","D.e.","Mín","Máx")
+saveRDS(tbl_cv_2hl,paste0(PATH,"/tabla_cv_2hl.rds"))
+```
+
+```{r vali_2, echo=FALSE}
+tbl_cv_2hl <- readRDS(paste0(PATH,"/tabla_cv_2hl.rds"))
+tbl_cv_2hl <- tbl_cv_2hl %>% 
+  as.data.frame() %>% 
+  dplyr::mutate(Delito = rownames(.))
+names(tbl_cv_2hl)[1:4] <- c("Media","D.e.","Mín","Máx")
+tbl_cv_2hl <- tbl_cv_2hl[,c(5,1,2,3,4)]
+knitr::kable(tbl_cv_2hl, digits = 3, row.names = FALSE)
+```
+
+## Exposición de caso
+
+En esta sección se realiza un paso a paso ilustrativo del ajuste
+y evaluación para los hurtos de celulares. El modelo usado en este
+caso trata de replicar el seleccionado en la sección **Modelos
+de regresión con ceros**, el cual es una red profunda de 3 capas
+completamente conectadas con 120, 60 y 30 neuronas de forma
+respectiva.
+
+```{r example_1, echo=FALSE}
+# Semilla
+set.seed(100)
+# Lista de delitos
+delito <- "HURTO DE CELULARES"
+# Ajuste
+bd <- proc_bogota(siedco_wc, "HURTO DE CELULARES", "reg", TRUE)
+temp_split <- create_split_long(Y = bd$y,
+                  X = subset(bd,select = -y),
+                  factors = c("CODIGO_DIV1"),
+                  split_prop = c(0.7,0.15,0.15))
+temp_split$X$X_train$FECHA <- as.numeric(temp_split$X$X_train$FECHA)
+temp_split$X$X_val$FECHA <- as.numeric(temp_split$X$X_val$FECHA)
+num_cols <- unlist(lapply(temp_split$X$X_train,is.numeric))
+sc_num <- lapply(temp_split$X$X_train[num_cols], scale)
+sc_center <- lapply(sc_num, function(x) attr(x, "scaled:center"))
+sc_scale <- lapply(sc_num, function(x) attr(x, "scaled:scale"))
+temp_split$X$X_train[num_cols] <- lapply(sc_num, as.numeric)
+temp_split$X$X_val[num_cols] <- 
+  Map(function(x,y,z){(x-y)/z},
+      x = temp_split$X$X_val[num_cols],
+      y = sc_center,
+      z = sc_scale)
+
+```
+
+Este sería el código usado por las funciones de búsqueda
+
+```{r example_2, echo=FALSE}
+# Semilla
+set.seed(100)
+# Transformacion de datos - keras
+split_keras <- split_nn(temp_split)
+scales <- list(mean = mean(split_keras$Y$Y_train),
+               sd = sd(split_keras$Y$Y_train))
+split_keras$Y <- lapply(split_keras$Y, 
+                        function(x) (x-scales$mean)/scales$sd)
+# Declaracion del modelo
+reg_cel <- keras::keras_model_sequential() %>%
+  keras::layer_dense(units = 120, activation = "relu", input_shape = c(ncol(split_keras$X$X_train))) %>%
+  keras::layer_dense(units = 60, activation = "relu") %>%
+  keras::layer_dense(units = 30, activation = "relu") %>%
+  keras::layer_dense(1)
+# Compilador, usando mse como perdida
+reg_cel %>%
+  keras::compile(
+    loss = "mse",
+    optimizer = keras::optimizer_adam(lr = 0.00005),
+    metrics = "mse"
+  )
+# Ajuste
+fit_cel <- reg_cel %>%
+  keras::fit(
+    split_keras$X$X_train,
+    split_keras$Y$Y_train,
+    epochs = 200,
+    batch_size = 512,
+    verbose = 0,
+    view_metrics = FALSE,
+    validation_data = list(split_keras$X$X_val, split_keras$Y$Y_val)
+  )
+```
+
+A continuación, se muestra una representación de la función de 
+perdida en entrenamiento y validación
+
+```{r example_3, echo=FALSE}
+plot(fit_cel)
+```
+
+Para contextualizar se muestran las series de tiempo reales y 
+ajustadas para la localidad de Puente Aranda en validación.
+
+**Serie completa**
+
+```{r, example_4, echo=FALSE}
+ind_loc <- which(temp_split$X$X_val$CODIGO_DIV1 == "16")
+dates <- 
+  data.table::as.IDate(temp_split$X$X_val$FECHA*sc_scale$FECHA+
+                         sc_center$FECHA)
+dates <- dates[ind_loc]
+y_obs <- temp_split$Y$Y_val[ind_loc]
+y_pred <- predict(reg_cel, split_keras$X$X_val)*scales$sd+
+  scales$mean
+y_pred <- y_pred[ind_loc]
+for(i in 1:length(y_pred)) y_pred[i] <- max(0,y_pred[i])
+data_example <- data.frame(vals = c(y_obs, y_pred),
+                           dates = rep(dates,2),
+                           class = rep(c("Obs","Pred"),
+                                       each=length(dates)))
+data_example %>%
+  ggplot2::ggplot(ggplot2::aes(x = dates, y = vals, 
+                               color = class)) +
+  ggplot2::geom_line() +
+  ggplot2::facet_wrap(~class, nrow = 2) +
+  ggplot2::theme_bw() +
+  ggplot2::labs(x = "Fecha", y = "Valores", color = "Tipo")
+```
+
+**Primeros seis meses**
+
+```{r, example_5, echo=FALSE}
+data_example %>%
+  dplyr::filter(dates >= "2019-01-01" & dates <= "2019-06-01") %>% 
+  ggplot2::ggplot(ggplot2::aes(x = dates, y = vals, 
+                               color = class)) +
+  ggplot2::geom_line() +
+  ggplot2::theme_bw() +
+  ggplot2::labs(x = "Fecha", y = "Valores", color = "Tipo")
+```
+

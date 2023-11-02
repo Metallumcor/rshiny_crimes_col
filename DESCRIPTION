@@ -1,0 +1,39 @@
+Package: test2021
+Type: Package
+Title: Preliminar del proyecto Mapas de Crimen
+Version: 0.2.13
+Author: David Humberto Cardenas Pineda
+Maintainer: David Humberto Cardenas Pineda <dhcardenasp@gmail.com>
+Description: Este paquete sirve de repositorio y testeo de los desarrollos para
+    el proyecto mapas de crimen, cuyo fin es crear una representación interactiva
+    de las estadísticas de crimen en ciudades claves en adición a los resultados
+    de modelos predictivos aplicados sobre estos datos.
+License: GPL (>= 2)
+Encoding: UTF-8
+LazyData: true
+LazyDataCompression: gzip 
+Imports: rgeos, maptools, dplyr, ukpolice, forcats, sf, sp,
+    shinyWidgets, grDevices, KernSmooth, ggplot2, stats,
+    lubridate, plotly, leaflet.extras, fable, fabletools, purrr, 
+    tsibble, cartogram, htmltools, utils, e1071, nnet, randomForest, 
+    rpart, keras, tidyr, corrplot
+NeedsCompilation: no
+RoxygenNote: 7.1.1
+Suggests: 
+    rmarkdown,
+    knitr,
+    kml,
+    shinyjs,
+    microbenchmark,
+    RSocrata,
+    osmdata,
+    MASS,
+    parallel,
+    forecast,
+    shinyMobile,
+    reshape2,
+    testthat (>= 3.0.0)
+VignetteBuilder: knitr
+Depends: 
+    R (>= 3.5.0), leaflet, shiny, shinydashboard, data.table
+Config/testthat/edition: 3

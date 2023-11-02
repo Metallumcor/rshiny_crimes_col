@@ -1,0 +1,852 @@
+---
+title: "Clasificación: modelos estadísticos y de ML - v2"
+output: 
+  html_document:
+    standalone: true
+    smart: true
+    normalize: true
+    toc: true
+    highlight: tango
+    self-contained: true
+    theme: cerulean
+  pdf_document:
+    toc: true
+    highlight: tango
+always_allow_html: true
+vignette: >
+  %\VignetteIndexEntry{Clasificación: modelos estadísticos y de ML - v2}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+**Autor**: David Humberto Cardenas Pineda.
+
+**Versión**: 1.0.
+
+**Fecha de versión:** Mayo 2021.
+
+En esta viñeta exploraremos algunos modelos de clasificación para datos relacionados 
+con delitos bajo el objetivo de identificación de la propensión normalizada
+por la cantidad de habitantes de los sectores de análisis la cual se ordena
+en cuatro categorías: muy baja, baja, moderada y alta.
+
+Primero se aclara que las bases de datos mencionadas dependerán de archivos 
+externos los cuales pueden ser solicitados bajo requerimiento previo al autor. 
+Con esto en consideración se cargan las siguientes librearías requeridas
+
+```{r libraries, warning=FALSE, message=FALSE}
+### test2021 para todas las utilidades y tidyverse para uso general
+require(test2021, quietly = TRUE)
+require(ggplot2, quietly = TRUE)
+require(dplyr, quietly = TRUE)
+```
+
+### Lectura de datos
+En esta viñeta se hará uso de la base aumentada de robos de bicicletas, la
+cual se carga enseguida
+
+```{r agument_data}
+### Carga de datos
+# Cambiar de acuerdo a la localizacion de los archivos externos
+PATH <- "D:/R_projects/r_packages/path/work_pkg/test2021"
+## Conjunto de datos existentes
+bici_db <- lon_hurto_bicicletas
+bici_db <- subset(bici_db, select = c(FECHA, CODIGO_DIV1, 
+                                       CODIGO_DIV2, SEXO,
+                                       RANG_DIA))
+## Proporcionalidad por sexo - Tomado de robo de bicis Bogota
+df_prop_sexo <- data.frame(
+  SEXO = c("FEMENINO", "MASCULINO", "NO REPORTA"),
+  PROP = prop.table(c(1579, 6332, 112))
+)
+## Proporcionalidad por rango del dia - Tomado de robo de bicis Bogota
+df_prop_rang_dia <- data.frame(
+  RANG_DIA = c("MADRUGADA", "MAÑANA", "TARDE", "NOCHE"),
+  PROP = prop.table(c(1868, 2387, 1915, 1791))
+)
+## Conjunto de datos externo
+# Lectura, se realiza por partes
+lon_part1 <- read.csv(paste0(PATH,"/extdata/londres_part1.csv"))
+lon_part2 <- read.csv(paste0(PATH,"/extdata/londres_part2.csv"))
+lon_part3 <- read.csv(paste0(PATH,"/extdata/londres_part3.csv"))
+lon_part4 <- read.csv(paste0(PATH,"/extdata/londres_part4.csv"))
+# Acoplamiento
+lon_full <- dplyr::bind_rows(lon_part1, lon_part2, lon_part3, lon_part4)
+# Depurar memoria
+rm(lon_part1,  lon_part2, lon_part3, lon_part4)
+# Filtar para robo de bicis
+lon_filter_bici <- lon_full %>%
+  dplyr::filter(Crime.type == "Bicycle theft") %>%
+  dplyr::select(Month, Longitude, Latitude)
+# Otra depuracion
+rm(lon_full)
+# Cambiar nombres para acoplar bases
+names(lon_filter_bici) <- c("FECHA", "longitude", "latitude")
+# Usar solo casos completos
+lon_filter_bici <- lon_filter_bici[complete.cases(lon_filter_bici),]
+## Procesamiento con las funciones del paquete
+# Agregar informacion espacial - Distritos y barrios
+lon_filter_bici <- add_spatial_f(lon_filter_bici, londres, "CODIGO_DIV1", "CODIGO_DIV2")
+# Agregar informacion de sexo y rango dia
+lon_filter_bici <- simular_variables_adicionales(lon_filter_bici, df_prop_sexo = df_prop_sexo,
+                                             df_prop_rang_dia = df_prop_rang_dia)
+# Sintetizar todo en una sola base de datos
+bici_db <- dplyr::bind_rows(lon_filter_bici, bici_db)
+# Transformar columna de fecha en Date
+bici_db$FECHA <- as.Date(paste0(bici_db$FECHA,"-01"))
+# Depuracion
+rm(lon_filter_bici)
+```
+
+Finalmente, como el primer análisis a realizar será sobre la cantidad
+de delitos cometidos en una localización espacial agregada en una
+fecha determinada (mes), se usaran en algunos puntos la versión
+`data.table` de las bases de datos para agregar y filtrar con facilidad
+
+```{r data_tables_def}
+### Definir los data.tables a usar 
+bici_dt <- data.table::as.data.table(bici_db)
+```
+
+### Procesamiento
+
+#### Normalización de conteos
+
+Para el ejercicio acá propuesto se fija el horizonte del análisis a nivel de distrito, 
+agregando entonces la información a dicho nivel con la siguiente instrucción
+
+```{r pre_pro_1}
+### Se requiere una separacion por distrito, en principio. Completando ceros
+db_1a <- as.data.frame(bici_dt[,.N,.(FECHA, CODIGO_DIV1)])
+db_1a <- fill_long(db_1a$N, subset(db_1a, select = -N),
+                   date_col = "FECHA", time_delta = "1 month")
+```
+
+Además, para el ajuste de los modelos se planea aplicar una partición del 70/15/15 con 
+la información disponible, pero antes de ello se realiza un análisis preliminar para 
+evaluar la necesidad de un tratamiento a los conteos antes de cambiarlos por clases-
+intervalos. 
+
+El siguiente diagrama de cajas es propuesto para iniciar dicho análisis
+
+```{r pre_pro_2}
+### Creacion de un split temporal para graficas
+split_graf <- create_split_long(db_1a$y, db_1a, factors = "CODIGO_DIV1", 
+                  split_prop = c(0.7, 0.15, 0.15))
+### Boxplots
+split_graf$X$X_train %>%
+  ggplot2::ggplot(ggplot2::aes(x = y, color = CODIGO_DIV1)) +
+  ggplot2::geom_boxplot() +
+  ggplot2::theme_bw() +
+  ggplot2::theme(legend.position = "none") +
+  ggplot2::xlab("Frecuencia de delitos/mes") 
+```
+
+El desbalance en la observación de ocurrencias de delitos se asume que 
+corresponde con las diferencias en las densidades poblaciones de cada unidad
+administrativa, haciendo necesaria una normalización de la respuesta en
+función de la población estimada para el año determinado de donde se obtiene
+el registro.
+
+En las siguientes instrucciones se realizará la normalización comentada, con
+un detalle adicional para *City of London* donde se agrega a su total
+poblacional el sector demográfico conocido como **población flotante** debido
+a la gran afluencia diaria de trabajadores de otros distritos.
+
+La base de datos usada para realizar la normalización no se encuentra disponible
+dentro del paquete final y debe ser solicitada a su autor.
+
+```{r pre_pro_3}
+## 1.2. Normalizacion por densidades
+lon_pop <- read.csv(paste0(PATH,"/extdata/londres_pop.csv"))
+# Ver los nombres de los distritos
+unique(lon_pop$Name)
+# Eliminar las agregaciones
+agg_cat <- c("London", "Greater London", "Outer London", "Inner London")
+lon_pop <- lon_pop[!lon_pop$Name %in% agg_cat,]
+# Retener solo campos necesarios
+lon_pop <- lon_pop[,c("Name","Year","Population")]
+# Obtener los CODIGOS_DIV1
+lon_pop <- merge(lon_pop, 
+                 unique(londres@data[,c("CODIGO_DIV1", "NOMBRE_DIV1")]), 
+                 by.x = "Name", by.y =  "NOMBRE_DIV1")
+# Merge con la tabla
+db_1a$Year <- format(db_1a$FECHA,"%Y")
+db_1a_norm <- merge(db_1a, lon_pop, by = c("CODIGO_DIV1","Year"))
+# Corregir poblacion flotante (Tomando 542.000 a 2020 y tasa de 
+# crecimiento exponencial constante de 1.35% anual)
+db_1a_norm <- db_1a_norm %>%
+  mutate(Population = Population + 
+           ifelse(Name == "City of London", 
+                  506851.2*(1+0.0135)^(as.numeric(Year)-2015),0))
+# Tasa de delitos por 100 mil habitantes
+db_1a_norm$y <- 100000*db_1a_norm$y/db_1a_norm$Population
+db_1a_norm$y <- 100000*db_1a_norm$y/db_1a_norm$Population
+```
+
+A continuación se vuelve a dibujar el diagramá de cajas para visualizar
+el efecto de la corrección
+
+```{r pre_pro_4}
+### Creacion de un split temporal para graficas
+split_graf <- create_split_long(db_1a_norm$y, db_1a_norm, factors = "CODIGO_DIV1", 
+                  split_prop = c(0.7, 0.15, 0.15))
+### Boxplot
+split_graf$X$X_train %>%
+  ggplot2::ggplot(ggplot2::aes(x = y, color = CODIGO_DIV1)) +
+  ggplot2::geom_boxplot() +
+  ggplot2::theme_bw() +
+  ggplot2::theme(legend.position = "none") +
+  ggplot2::xlab("delitos/mes x 100 mil habitantes")
+```
+
+Aunque los distritos con una gran cantidad de conteos se mantuvieron distantes
+del resto, e inclusive llego a aumentar esa diferencia, se asume que la 
+ocurrencia de dicho delito esta ligada al distrito en si y no se descarta 
+la transformación propuesta.
+
+#### Adición de variables y partición
+
+En la viñeta de modelos de regresión/series de tiempo para predecir la cantidad de 
+delitos, se propuso un conjunto alterno de datos donde se incluyó la respuesta
+rezagada como variable independiente. En este documento se realizará un 
+procedimiento similar con la respuesta antes de ser trasformada a categoría.
+
+En el siguiente bloque se crea el conjunto `db_1b_norm` con las tasas de
+delitos por cada 100 mil habitantes de los últimos 3 meses como variables
+independientes
+
+```{r pre_pro_4b}
+### Adicion de lags
+# La adicion se realiza considerando todo el conjunto de datos
+# Esto no presenta algun problema dado que a futuro asumimos conocidos los
+# Conteos pasados (el horizonte de prediccion sera de un paso adelante)
+db_1b_norm <- add_laggs(db_1a_norm, db_1a_norm$y, p = 3)
+### Adicion de secuencia numerica de seguimiento de fecha
+fecha_look <- data.frame(fecha = unique(db_1b_norm$FECHA), 
+                         num_fecha = 1:length(unique(db_1b_norm$FECHA)))
+db_1b_norm$FECHA_NUM <- fecha_look[match(db_1b_norm$FECHA,fecha_look$fecha),"num_fecha"]
+```
+
+Ya con el conjunto principal y alternos a disposición, se hacen unos retoques
+y luego se procede a crea la partición 70/15/15 tratada al inicio de la anterior sección
+
+```{r pre_pro_4c}
+# Renombrar respuesta por conveniencia
+db_1a_norm$CLASS <- db_1a_norm$y 
+db_1b_norm$CLASS <- db_1b_norm$y 
+# Drop de variables no requeridas
+db_1a_norm <- subset(db_1a_norm, select = c(CODIGO_DIV1, FECHA, CLASS))
+db_1b_norm <- subset(db_1b_norm, select = c(CODIGO_DIV1, FECHA, CLASS,
+                                            Y1, Y2, Y3, FECHA_NUM))
+# Tratamiento de fechas
+db_1a_norm <- add_date_split(db_1a_norm, "FECHA", 
+                             week = FALSE,
+                             week_day = FALSE,
+                             fast = FALSE)
+db_1a_norm$ANNO <- as.numeric(db_1a_norm$ANNO)
+db_1b_norm <- add_date_split(db_1b_norm, "FECHA", 
+                             week = FALSE,
+                             week_day = FALSE,
+                             fast = FALSE)
+db_1b_norm$ANNO <- as.numeric(db_1b_norm$ANNO)
+# Crear splits
+db_1a_norm$CODIGO_DIV1 <- factor(db_1a_norm$CODIGO_DIV1)
+db_1a_norm$MES <- factor(db_1a_norm$MES)
+split_class <- create_split_long(db_1a_norm$CLASS, 
+                                 db_1a_norm[,-2],
+                                 factors = "CODIGO_DIV1",
+                                 split_prop = c(0.7,0.15,0.15))
+db_1b_norm$CODIGO_DIV1 <- factor(db_1b_norm$CODIGO_DIV1)
+db_1b_norm$MES <- factor(db_1b_norm$MES)
+split_class_b <- create_split_long(db_1b_norm$CLASS, 
+                                 db_1b_norm[,-2],
+                                 factors = "CODIGO_DIV1",
+                                 split_prop = c(0.7,0.15,0.15))
+```
+
+#### Creación de categorías
+
+Ya con la respuesta tratada y las particiones creadas, se procede a generar las
+categorías ordenadas a partir de las tasas explorando dos aproximaciones: 
+cuantiles y cortes naturales (Jenks). Para esto se emplea la funcionalidad 
+`num2ctgr` 
+
+```{r pre_pro_5}
+### num2ctgr crea los intervalos de acuerdo al metodo (type) seleccionado
+### De acuerdo a type, se requieren ciertos argumentos adicionales
+## NOTA: Los intervalos pueden variar entre conjuntos de datos por su definicion
+## A.1 Intervalos usando cuantiles -> Cuantiles 0.15, 0.5 y 0.8
+int_cuantiles <- num2ctgr(split_class$Y$Y_train, 
+                          type = "quantiles", probs = c(0.15, 0.5, 0.8))
+int_cuantiles_b <- num2ctgr(split_class_b$Y$Y_train, type = "quantiles", 
+                            probs = c(0.15, 0.5, 0.8))
+# Estos serian los intervalos
+levels(int_cuantiles$intrvls)
+levels(int_cuantiles_b$intrvls)
+## A.2 Intervalos usando cortes naturales -> Usando 4 grupos
+int_jenks <- num2ctgr(split_class$Y$Y_train, type = "jenks", n = 4)
+int_jenks_b <- num2ctgr(split_class_b$Y$Y_train, type = "jenks", n = 4)
+# Estos serian los intervalos con su correspondiente porcentaje
+100*table(int_jenks$intrvls)/length(int_jenks$intrvls)
+100*table(int_jenks_b$intrvls)/length(int_jenks_b$intrvls)
+```
+
+Por el desbalanceo de los cortes naturales se continuará con los intervalos
+proporcionados por cuantiles. La función `ctgr2nmd` será usada para asignarle los siguientes nombres a los intervalos
+de las tasas: muy bajo, bajo, moderado y alto.
+
+```{r pre_pro_6}
+### Remplazar los nombres en entrenamiento
+niveles <- c("Muy bajo","Bajo","Moderado","Alto")
+split_class$Y$Y_train <- ctgr2nmd(int_cuantiles, niveles)
+split_class_b$Y$Y_train <- ctgr2nmd(int_cuantiles_b, niveles)
+```
+
+Para transformar a intervalos las respuestas numéricas en
+validación/entrenamiento se puede usar la funcionalidad `add2ctgr` del paquete, 
+junto a `ctgr2nmd`
+
+```{r pre_pro_6b}
+### Remplazar los nombres en validacion
+split_class$Y$Y_val <- ctgr2nmd(add2ctgr(split_class$Y$Y_val, int_cuantiles), niveles)  
+split_class_b$Y$Y_val <- ctgr2nmd(add2ctgr(split_class_b$Y$Y_val, int_cuantiles_b), niveles)
+```
+
+Finalmente, con las clases ya creadas, se crean versiones alternas de las
+particiones donde las variables independientes numéricas sean estandarizadas 
+
+```{r pre_pro_7}
+### Conjuntos escalados usando entrenamiento
+# Original
+split_class_std <- split_class
+std_a <- scale(split_class$X$X_train$ANNO) 
+split_class_std$X$X_train$ANNO <- as.numeric(std_a)
+mn_train <- attr(std_a,"scaled:center")
+sd_train <- attr(std_a,"scaled:scale")
+split_class_std$X$X_val$ANNO <- ((split_class_std$X$X_val$ANNO)-mn_train)/sd_train
+# Aumentado
+split_class_b_std <- split_class_b
+num_ind <- sapply(split_class_b$X$X_train, is.numeric)
+std_b <- lapply(split_class_b$X$X_train[num_ind], scale)
+split_class_b_std$X$X_train[num_ind] <- as.numeric(do.call(cbind, std_b))
+mn_b_train <- lapply(std_b, function(x)attr(x,"scaled:center"))
+sd_b_train <- lapply(std_b, function(x) attr(x,"scaled:scale"))
+split_class_b_std$X$X_val[num_ind] <- 
+  mapply(function(x,y,z) (x-y)/z, x = split_class_b_std$X$X_val[num_ind], 
+         y = mn_b_train, z = sd_b_train)
+```
+
+### Modelos de clasificación
+
+En esta sección se exploraran diferentes clasificadores propuestos en el 
+paquete que funcionan como benchmark para futuras versiones
+
+#### 1) Modelo multinomial
+
+Siendo $Y_{ijk}$ la variable indicadora asociada a la $i$-ésima fecha, $j$-ésima 
+unidad/agregación espacial y la $k$-ésima categoría de propensión de delito, al 
+agregar todas las indicadoras con los mismos índices $i$ y $j$ se obtiene
+un vector $Y_{ij}$ que sigue un modelo multinomial al asumir que las 
+categorías son mutuamente excluyentes y la suma de sus probabilidades
+es igual a uno.
+
+Las probabilidades de este modelo multinomial se notan como $\pi_{ijk}$ y se
+consideran como logs-odds (respecto a una categoría base) para ser explicados
+mediante un modelo lineal donde se incluyan variables independientes $X$. 
+Omitiendo otros detalles teóricos, el ajuste de dichos modelos para fines
+predictivos se realiza mediante la rutina `multinom` de la librería
+`nnet` con una metodología de redes neuronales sin capas ocultas. Esta
+se incorpora dentro de la función `multinom_mod_selector`. A continuación
+un ejemplo de su aplicación.
+
+```{r mod_multi_1}
+### Correr el selector de modelo
+modelo_multinom <- multinom_mod_selector(split_out = split_class,
+                                         quiet = TRUE,
+                                         scaled = FALSE,
+                                         maxit = 150)
+### Medidas de rendimiento del modelo en entretamiento
+clsf_metrics(fit = modelo_multinom$fit, split_out = split_class_std, objective = "train")
+### Medidas de rendimiento del modelo en validacion
+clsf_metrics(fit = modelo_multinom$fit, split_out = split_class_std, objective = "validation")
+```
+
+Para el modelo propuesto las medidas sugieren la necesidad de algunas mejoras.
+Además, dado que el problema en un futuro puede presentar falencias en balanceo
+se debería considerar mirar midas otras medidas micro con detalle.
+
+Con el conjunto de datos aumentado por las variables rezagadas se obtienen los
+siguientes desempeños
+
+```{r mod_multi_2}
+### Correr el selector de modelo
+modelo_multinom_b <- multinom_mod_selector(split_out = split_class_b,
+                                         quiet = TRUE,
+                                         scaled = FALSE)
+### Medidas de rendimiento del modelo en entretamiento
+clsf_metrics(fit = modelo_multinom_b$fit, split_out = split_class_b_std, objective = "train")
+### Medidas de rendimiento del modelo en validacion
+clsf_metrics(fit = modelo_multinom_b$fit, split_out = split_class_b_std, objective = "validation")
+```
+
+Como alternativa al ajuste realizado mediante la rutina `multinom` es posible
+completar el ajuste del modelo usando directamente `nnet` con la cual se
+incluye una capa oculta con una cantidad de nodos personalizable. En seguida
+se muestra un ejemplo realizado sobre el conjunto aumentado usando una
+capa oculta de 3 nodos
+
+```{r mod_multi_3}
+### Correr el selector de modelo
+### size determina la cantidad de nodos de la NN
+modelo_multinom_c <- multinom_mod_selector(split_out = split_class_b,
+                                         quiet = TRUE,
+                                         scaled = FALSE,
+                                         size = 4)
+### Medidas de rendimiento del modelo en entretamiento
+clsf_metrics(fit = modelo_multinom_c$fit, split_out = split_class_b_std, objective = "train")
+### Medidas de rendimiento del modelo en validacion
+clsf_metrics(fit = modelo_multinom_c$fit, split_out = split_class_b_std, objective = "validation")
+```
+
+#### 2) Clasificador Bayesiano - Naïve Bayes
+
+El clasificador Naïve Bayes es de tipo probabilístico partiendo de la aplicación
+del teorema de Bayes en principió y asumiendo independencia condicional entre
+las variables predictoras, dada la variable dependiente. Existen diferentes
+rutinas para la estimación de las probabilidades de las clases posteriores, y en
+consecuencia del valor pronosticado, que van desde máxima verosimilitud
+hasta estadística no parámetrica. En el caso del presente paquete se recurre
+a algoritmos del primer tipo con supuestos de normalidad mediante la función
+\code{naiveBayes} del paquete \code{e1071}. En seguida el ejemplo de
+su aplicación con el conjunto de hurtos de bicicletas
+
+```{r mod_nb_1}
+### Correr el selector de modelo
+modelo_nb <- nb_mod_selector(split_out = split_class,
+                                 scaled = FALSE,
+                                 quiet = TRUE)
+### Medidas de rendimiento del modelo en entretamiento
+clsf_metrics(fit = modelo_nb$fit, split_out = split_class_std, objective = "train")
+### Medidas de rendimiento del modelo en validacion
+clsf_metrics(fit = modelo_nb$fit, split_out = split_class_std, objective = "validation")
+```
+
+Se puede ver que el clasificador Naïve obtiene resultados similares, pero 
+ligeramente mejores, que el modelo multinomial. Las diferencias radican en
+el tipo de error de clasificación cometido, que en el caso Naïve se distribuyen
+con mayor uniformidad.
+
+Ahora se corre el mismo modelo pero tomando las tasas rezagadas
+
+```{r mod_nb_2}
+### Correr el selector de modelo
+modelo_nb_b <- nb_mod_selector(split_out = split_class_b,
+                                 scaled = FALSE,
+                                 quiet = TRUE)
+### Medidas de rendimiento del modelo en entretamiento
+clsf_metrics(fit = modelo_nb_b$fit, split_out = split_class_b_std, objective = "train")
+### Medidas de rendimiento del modelo en validacion
+clsf_metrics(fit = modelo_nb_b$fit, split_out = split_class_b_std, objective = "validation")
+```
+
+
+#### 3) Maquinas de vectores de soporte
+
+Otro de los modelos de benchmark para los problemas de clasificación son las
+*SVM* que consisten en clasificadores lineales por ajuste de hiperplanos
+para la separación de dos conjuntos de datos, posterior a una proyección
+en un espacio adecuado mediante funciones *kernel*. Si bien las *SVM*
+funcionan en principio como clasificadores binarios, estas pueden ser usadas
+para clasificación múltiple mediante la metodología *uno contra todos* que
+consiste en crear $_kC_{2}$ modelos *SVM*, siendo $k$ el número de clases,
+donde se usa una clase como el caso positivo y el resto como negativas, para
+posteriormente combinar los resultados de estos modelos mediante *votación*
+(cantidad de positivos/negativos o probabilidad)
+
+En ```test2021``` se implementa la metodología anterior mediante la función
+```svm_mod_selector``` como se muestra a continuación
+
+```{r mod_svm_1}
+### Correr el selector de modelo
+modelo_svm <- svm_mod_selector(split_out = split_class,
+                                 scaled = FALSE,
+                                 quiet = TRUE)
+### Medidas de rendimiento del modelo en entretamiento
+clsf_metrics(fit = modelo_svm$fit, split_out = split_class, objective = "train")
+### Medidas de rendimiento del modelo en validacion
+clsf_metrics(fit = modelo_svm$fit, split_out = split_class, objective = "validation")
+```
+
+Para este tipo de modelos se implementa la rutina de optimización de parámetros 
+propia del paquete `e1071`, la cual se realiza usando el parámetro
+`tuning = TRUE` y pasando los demás argumentos sobre los cualed se realiza
+la optimización para lo cual se recomienda consultar la documentación de
+`svm`
+
+```{r mod_svm_2, eval=FALSE}
+### Correr el selector de modelo 
+mejor_modelo_svm <- svm_mod_selector(split_out = split_class,
+                                 scaled = FALSE,
+                                 quiet = TRUE, 
+                                 tuning = TRUE,
+                                 gamma = 10^(-1:3),
+                                 cost = 10^(1:4))
+```
+
+```{r mod_svm_3, echo=FALSE}
+### Cargar el modelo ya establecido
+mejor_modelo_svm <- readRDS(paste0(PATH,"/vignettes/models/mejor_modelo_svm_v2.rds"))
+```
+
+```{r mod_svm_4}
+### Medidas de rendimiento del modelo en entretamiento
+clsf_metrics(fit = mejor_modelo_svm$fit, split_out = split_class, objective = "train")
+### Medidas de rendimiento del modelo en validacion
+clsf_metrics(fit = mejor_modelo_svm$fit, split_out = split_class, objective = "validation")
+```
+
+En este caso las *SVM* logran pronosticar todas las clases, aunque a 
+comparación de los anteriores modelos estos tienen una mejor predicción de las
+clases con mayor peso y van peor en aquellas con menor proporción de 
+representación en el conjunto de entrenamiento, haciendo esta aclaración en
+vista de la inclinación en validación a la categoría alta.
+
+Finalmente se repite el proceso de optimización con el conjunto aumentado
+
+```{r mod_svm_5, eval=FALSE}
+### Correr el selector de modelo 
+mejor_modelo_svm_b <- svm_mod_selector(split_out = split_class_b,
+                                 scaled = FALSE,
+                                 quiet = TRUE, 
+                                 tuning = TRUE,
+                                 gamma = 10^(-1:3),
+                                 cost = 10^(1:4))
+```
+
+```{r mod_svm_6, echo=FALSE}
+### Cargar el modelo ya establecido
+mejor_modelo_svm_b <- readRDS(paste0(PATH,"/vignettes/models/mejor_modelo_svm_b_v2.rds"))
+```
+
+```{r mod_svm_7}
+### Medidas de rendimiento del modelo en entretamiento
+clsf_metrics(fit = mejor_modelo_svm_b$fit, split_out = split_class_b, objective = "train")
+### Medidas de rendimiento del modelo en validacion
+clsf_metrics(fit = mejor_modelo_svm_b$fit, split_out = split_class_b, objective = "validation")
+```
+
+
+#### 4) Arboles de decisión 
+
+Los arboles de decisión son un tipo de algoritmo de clasificación no lineal
+basados en la generación/partición de nodos a partir de un criterio de
+pureza (como el coeficiente Gini) de sus ramas/hojas en las cuales se
+asignan las variables junto con el conjunto de valores que son más 
+representativos de cierto conjunto de categorías. Son modelos que pueden
+ser interpretados con facilidad, pero tienden a sobre-ajustar los datos
+en entrenamiento. No obstante existen medidas remedio para dicho problema
+como la **poda** (o *pruning*) que eliminan el exceso de ramificaciones, 
+permitiendo al modelo resultando una mayor generalización.
+
+El paquete `rpart` contiene las rutinas necesarias para el crecimiento
+y poda de arboles de decisión para clasificación, por ello funciona como
+núcleo de la rutina `tree_model_selector`. En seguida se presenta un
+ejemplo
+
+```{r mod_tree_1, eval=FALSE}
+### Correr el selector de modelo 
+### La opcion auto_prune permite que el programa realice la poda sin 
+### supervision. En otro caso se debe incluir el parametro cp de preferencia
+modelo_arbol <- tree_mod_selector(split_out = split_class, 
+                                 scaled = FALSE,
+                                 auto_prune = TRUE)
+```
+
+```{r mod_tree_2, echo=FALSE}
+### Cargar el modelo ya establecido
+modelo_arbol <- readRDS(paste0(PATH,"/vignettes/models/modelo_arbol.rds"))
+```
+
+```{r mod_tree_3}
+### Medidas de rendimiento del modelo en entretamiento
+clsf_metrics(fit = modelo_arbol$fit, split_out = split_class_std, objective = "train")
+### Medidas de rendimiento del modelo en validacion
+clsf_metrics(fit = modelo_arbol$fit, split_out = split_class_std, objective = "validation")
+```
+
+En general se obtiene un mejor rendimiento en todas las métricas con los 
+arboles de decisión, esperando que en caso de darse un ajuste de hiper-parámetros
+este mejore y sobre salga contra el resto.
+
+Ahora para el caso de incluir los rezagos adicionales se obtienen los siguientes
+resultados
+
+```{r mod_tree_4, eval=FALSE}
+### Correr el selector de modelo 
+### La opcion auto_prune permite que el programa realice la poda sin 
+### supervision. En otro caso se debe incluir el parametro cp de preferencia
+modelo_arbol_b <- tree_mod_selector(split_out = split_class_b, 
+                                 scaled = FALSE,
+                                 auto_prune = TRUE)
+```
+
+```{r mod_tree_5, echo=FALSE}
+### Cargar el modelo ya establecido
+modelo_arbol_b <- readRDS(paste0(PATH,"/vignettes/models/modelo_arbol_b_v2.rds"))
+```
+
+```{r mod_tree_6}
+### Medidas de rendimiento del modelo en entretamiento
+clsf_metrics(fit = modelo_arbol_b$fit, split_out = split_class_b_std, objective = "train")
+### Medidas de rendimiento del modelo en validacion
+clsf_metrics(fit = modelo_arbol_b$fit, split_out = split_class_b_std, objective = "validation")
+```
+
+#### 5) Random Forest
+
+Los ensambles son una combinación de modelos de aprendizaje de maquina y 
+estadísticos cuyo objetivo es mejorar el poder predictivo de los anteriores
+con la **mezcla** de los resultados de cada uno. Los Random Forest son
+un caso particular de ensambles donde se toman arboles de decisión como los
+modelos de partida y se ensamblan en uno solo mediante la técnica de *Bagging*,
+la cual se puede describir como el ajuste de los modelos base en sub-conjuntos
+de observaciones/variables originales y combinación de resultados mediante
+votación, lo cual ayuda a reducir substancialmente la varianza resultante
+de los modelos de partida.
+
+La librería `randomForest` ofrece diferentes utilidades para el crecimiento
+de estos ensambles, su diagnosticó y otros procedimientos relacionados. En 
+`test2021` se propone la rutina `tree_mod_selector` 
+
+```{r mod_rf_1, eval=FALSE}
+### Correr el selector de modelo 
+modelo_rf <- rf_mod_selector(split_out = split_class,
+                             scaled = FALSE,
+                             quiet = TRUE,
+                             tuning = TRUE)
+```
+
+```{r mod_rf_2, echo=FALSE}
+### Cargar el modelo ya establecido
+modelo_rf <- readRDS(paste0(PATH,"/vignettes/models/modelo_rf.rds"))
+```
+
+```{r mod_rf_3}
+### Medidas de rendimiento del modelo en entretamiento
+clsf_metrics(fit = modelo_rf$fit, split_out = split_class_std, objective = "train")
+### Medidas de rendimiento del modelo en validacion
+clsf_metrics(fit = modelo_rf$fit, split_out = split_class_std, objective = "validation")
+```
+
+Una observación sobre los menores rendimientos del Random Forest respecto
+a la versión básica de árbol de decisión se puede entender por la falta de 
+pases de validación cruzada e igualdad de condiciones en las rutinas de
+crecimiento de los arboles que conforman el ensamblador.
+
+A continuación se ajustan los modelos con el conjunto de datos aumentado
+
+```{r mod_rf_4, eval=FALSE}
+### Correr el selector de modelo 
+modelo_rf_b <- rf_mod_selector(split_out = split_class_b,
+                             scaled = FALSE,
+                             quiet = TRUE,
+                             tuning = TRUE)
+```
+
+```{r mod_rf_5, echo=FALSE}
+### Cargar el modelo ya establecido
+modelo_rf_b <- readRDS(paste0(PATH,"/vignettes/models/modelo_rf_b_v2.rds"))
+```
+
+```{r mod_rf_6}
+### Medidas de rendimiento del modelo en entretamiento
+clsf_metrics(fit = modelo_rf_b$fit, split_out = split_class_b_std, objective = "train")
+### Medidas de rendimiento del modelo en validacion
+clsf_metrics(fit = modelo_rf_b$fit, split_out = split_class_b_std, objective = "validation")
+```
+
+Vale destacar que al incrementar las variables para Random Forest se obtienen
+los mejores rendimientos entre todos los modelos expuestos. Estas son las importancias de las variables del último modelo
+
+```{r mod_rf_7}
+round(randomForest::importance(modelo_rf_b$fit),2)
+```
+
+
+### Resumen de modelos de clasificación
+
+Dada la naturaleza estocástica de ciertos modelos como el multinomial con una 
+capa oculta y *Random Forest*, para obtener una mejor perspectiva del 
+rendimiento de estos se recurre a múltiples ajustes (50 en total)
+de los cuales se obtienen sus *accuracy* en entrenamiento y validación, 
+resumidas en las siguientes visualizaciones
+
+**Nota:** Todos los modelos son implementados sobre el conjunto de datos aumentado
+
+````{r conclusion_1, eval=FALSE, echo=FALSE}
+### libreria para paralelismos
+library(parallel)
+# Identificar cantidad de clusters a usar
+cluster_1 <- makeCluster(detectCores()-3)
+# Pasar librearias a los clusters
+clusterEvalQ(cluster_1,library(test2021))
+# Export del split
+clusterExport(cluster_1, c("split_class_b"))
+## Secuencias paralelas 
+# multi
+multi_1hl <- parLapply(cluster_1, 1:50, function(x,...) 
+  multinom_mod_selector(split_out = split_class_b,                                            
+                        quiet = TRUE,
+                        scaled = FALSE,
+                        maxit = 250, size = 4))
+# D. Tree - Se corre para verificar si por alguna razon es estocastico
+tree <- parLapply(cluster_1, 1:50, function(x,...) 
+  tree_mod_selector(split_out = split_class_b, 
+                    scaled = FALSE,
+                    auto_prune = TRUE))
+# R Forest
+rf <- parLapply(cluster_1, 1:50,function(x,...) 
+  rf_mod_selector(split_out = split_class_b,
+                  scaled = FALSE,
+                  quiet = TRUE,
+                  tuning = TRUE))
+# Cerrar conexion
+stopCluster(cluster_1)
+## Pasar listas a data.frame
+df_esto_train <- data.frame(multinomial = sapply(multi_1hl,function(x) x$acc_train),
+                            decision_tree = sapply(tree,function(x) x$acc_train),
+                            random_forest = sapply(rf,function(x) x$acc_train))
+df_esto_val <- data.frame(multinomial = sapply(multi_1hl,function(x) x$acc_val),
+                          decision_tree = sapply(tree,function(x) x$acc_val),
+                          random_forest = sapply(rf,function(x) x$acc_val))
+## Crear un conjunto de datos para grafica de random forest
+importancias <- lapply(rf, function(x){
+                objeto <- x$fit$importance
+                objeto <- data.frame(nombre = rownames(objeto), 
+                            valores = order(objeto, decreasing = TRUE))
+            })
+importancias <- do.call(rbind,importancias)
+
+completo <- importancias %>%
+  tidyr::expand(nombre, valores) 
+
+resumen_rf <- importancias %>%
+  group_by(nombre, valores) %>%
+  summarise(n = n()) %>%
+  right_join(completo) %>%
+  replace(is.na(.),0) 
+```
+```{r conclusion_2, echo=FALSE}
+# Llamar a los datos guardados
+df_esto_train <- readRDS(paste0(PATH,"/vignettes/models/df_esto_train.rds"))
+df_esto_val <- readRDS(paste0(PATH,"/vignettes/models/df_esto_val.rds"))
+resumen_rf <- readRDS(paste0(PATH,"/vignettes/models/resumen_rf.rds"))
+```
+
+```{r conclusion_3, echo=FALSE}
+library(reshape2)
+# Boxplot - train
+df_esto_train %>%
+  subset(select = -decision_tree) %>%
+  reshape2::melt() %>%
+  ggplot2::ggplot(ggplot2::aes(x = variable, y = value))+
+  ggplot2::geom_boxplot() +
+  ggplot2::theme_bw() +
+  ggplot2::ylab("Accuracy") +
+  ggplot2::xlab("") +
+  ggplot2::ggtitle("Comparación en entrenamiento")
+```
+
+```{r conclusion_4, echo=FALSE}
+# Boxplot - validacion
+df_esto_val %>%
+  subset(select = -decision_tree) %>%
+  reshape2::melt() %>%
+  ggplot2::ggplot(ggplot2::aes(x = variable, y = value))+
+  ggplot2::geom_boxplot() +
+  ggplot2::theme_bw() +
+  ggplot2::ylab("Accuracy") +
+  ggplot2::xlab("") +
+  ggplot2::ggtitle("Comparación en validación")
+```
+
+Para una mayor precisión del análisis de los resultados anteriores se suministra
+una tabla con las medidas resumen más relevantes en validación
+
+```{r conclusion_5, echo=FALSE}
+# Presentar un kable
+df_esto_val_2 <- subset(df_esto_val, select = -decision_tree)
+data_resumen <- data.frame(Min = unlist(lapply(df_esto_val_2, min)),
+                           Max = unlist(lapply(df_esto_val_2, max)),
+                           Media = unlist(lapply(df_esto_val_2, mean)),
+                           DE = unlist(lapply(df_esto_val_2, sd)),
+                           CV = unlist(
+                             lapply(df_esto_val_2,function(x) 
+                               round(100*sd(x)/mean(x),3))))
+rownames(data_resumen) <- c("Multinomial 1hl", "Random Forest")
+knitr::kable(data_resumen, digits = 3, row.names = TRUE)
+```
+
+Además, se reporta las importancias de las variables de *Random Forest*
+en el siguiente gráfico ordenadas de mayor a menor reducción de la 
+*accuracy* en la eliminación de dicha variable del modelo (todos los arboles)
+
+```{r conclusion_5b, echo=FALSE}
+ggplot2::ggplot(resumen_rf, ggplot2::aes(as.factor(valores), nombre, fill= n)) + 
+  ggplot2::geom_tile() +
+  ggplot2::scale_fill_gradient(low="white", high="blue") +
+  ggplot2::theme_bw() +
+  ggplot2::ylab("") +
+  ggplot2::xlab("Orden de importancia") +
+  ggplot2::labs(fill = "Frecuencia")
+```
+
+
+
+Tomando en consideración las medianas de las *accuracy* reportadas para
+los anteriores modelos, acá se presenta una comparación de estos con aquellos
+del tipo deterministicó, es decir, los que siempre devuelven los mismos 
+resultados. Se aclara que la comparación se realiza solamente con los modelos
+ajustados sobre el conjunto de datos aumentado
+
+```{r conclusion_6, echo=FALSE}
+# Lista de modelos - Datos aumentados
+modelos_b <- c("Multi","NN_1HL","NBayes","SVM","DTree","RForest")
+v_train_b <- c(clsf_metrics(fit = modelo_multinom_b$fit, split_out = split_class_b_std, 
+                  objective = "train", metrics_out = "accuracy"),
+     quantile(df_esto_train$multinomial, 0.5),
+     clsf_metrics(fit = modelo_nb_b$fit, split_out = split_class_b_std, 
+                  objective = "train", metrics_out = "accuracy"),
+     clsf_metrics(fit = mejor_modelo_svm_b$fit, split_out = split_class_b, 
+                  objective = "train", metrics_out = "accuracy"),
+     quantile(df_esto_train$decision_tree, 0.5),
+     quantile(df_esto_train$random_forest, 0.5))
+v_val_b <- c(clsf_metrics(fit = modelo_multinom_b$fit, split_out = split_class_b_std, 
+                  metrics_out = "accuracy"),
+     quantile(df_esto_val$multinomial, 0.5),
+     clsf_metrics(fit = modelo_nb_b$fit, split_out = split_class_b_std, 
+                  metrics_out = "accuracy"),
+     clsf_metrics(fit = mejor_modelo_svm_b$fit, split_out = split_class_b, 
+                  metrics_out = "accuracy"),
+     quantile(df_esto_val$decision_tree, 0.5),
+     quantile(df_esto_val$random_forest, 0.5))
+df_graf_b <- data.frame(modelo = rep(modelos_b,2), accuracy = c(v_train_b, v_val_b), 
+                      etapa = rep(c("Entrenamiento", "Validación"),each = length(modelos_b)))
+
+```
+
+```{r conclusion_7, echo=FALSE}
+# Grafica
+ggplot2::ggplot(data = df_graf_b, ggplot2::aes(x = modelo, y = accuracy, fill = etapa))+
+  ggplot2::geom_col(position = "dodge") +
+  ggplot2::theme_bw() +
+  ggplot2::ggtitle("Comparación de rendimientos - Modelos con datos aumentados")
+```

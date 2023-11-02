@@ -1,0 +1,731 @@
+---
+title: "Uso de modelos de predicción"
+output: 
+  html_document:
+    standalone: true
+    smart: true
+    normalize: true
+    toc: true
+    highlight: tango
+    self-contained: true
+    theme: cerulean
+  pdf_document:
+    toc: true
+    highlight: tango
+always_allow_html: true
+vignette: >
+  %\VignetteIndexEntry{Uso de modelos de predicción}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+**Autor**: David Humberto Cardenas Pineda.
+
+**Versión**: 1.0.
+
+**Fecha de versión:** Mayo 2021.
+
+En esta viñeta exploraremos algunos modelos de predicción para datos
+relacionados con delitos como ocurrencias y cantidades esperadas, 
+mediante dos ejemplos en Gran Londres: hurto de bicicletas y
+comportamientos antisociales.
+
+Primero se aclara que las bases de datos mencionadas dependeran
+de archivos externos los cuales pueden ser solicitados bajo
+requerimento previo al autór. Con esto en consideración se
+cargan las siguientes librearías requeridas
+```{r libraries, warning=FALSE, message=FALSE}
+### test2021 para todas las utilidades y algunas de tidyverse para uso general
+require(test2021, quietly = TRUE)
+require(dplyr, quietly = TRUE)
+require(ggplot2, quietly = TRUE)
+require(tidyr, quietly = TRUE)
+```
+
+### Lectura de datos
+Las siguientes instrucciones son encargadas para aumentar la
+base de datos ya existente dentro del paquete, con la inclusión
+de los archivos externos.
+```{r agument_data}
+### Carga de datos
+# Cambiar de acuerdo a la localizacion de los archivos externos
+PATH <- "D:/R_projects/r_packages/path/work_pkg/test2021"
+## Conjunto de datos existentes
+# Bicicletas
+bici_db <- lon_hurto_bicicletas
+bici_db <- subset(bici_db, select = c(FECHA, CODIGO_DIV1, 
+                                       CODIGO_DIV2, SEXO,
+                                       RANG_DIA))
+# Asalto
+rob_db <- lon_comportamiento_antisocial
+rob_db <- subset(rob_db, select = c(FECHA, CODIGO_DIV1, 
+                                       CODIGO_DIV2, SEXO,
+                                       RANG_DIA))
+## Proporcionalidad por sexo - Tomado de robo de bicis Bogota
+df_prop_sexo <- data.frame(
+  SEXO = c("FEMENINO", "MASCULINO", "NO REPORTA"),
+  PROP = prop.table(c(1579, 6332, 112))
+)
+## Proporcionalidad por rango del dia - Tomado de robo de bicis Bogota
+df_prop_rang_dia <- data.frame(
+  RANG_DIA = c("MADRUGADA", "MAÑANA", "TARDE", "NOCHE"),
+  PROP = prop.table(c(1868, 2387, 1915, 1791))
+)
+## Conjunto de datos externo
+# Lectura, se realiza por partes
+lon_part1 <- read.csv(paste0(PATH,"/extdata/londres_part1.csv"))
+lon_part2 <- read.csv(paste0(PATH,"/extdata/londres_part2.csv"))
+lon_part3 <- read.csv(paste0(PATH,"/extdata/londres_part3.csv"))
+lon_part4 <- read.csv(paste0(PATH,"/extdata/londres_part4.csv"))
+# Acoplamiento
+lon_full <- dplyr::bind_rows(lon_part1, lon_part2, lon_part3, lon_part4)
+# Depurar memoria
+rm(lon_part1,  lon_part2, lon_part3, lon_part4)
+# Filtar para robo de bicis
+lon_filter_bici <- lon_full %>%
+  dplyr::filter(Crime.type == "Bicycle theft") %>%
+  dplyr::select(Month, Longitude, Latitude)
+# Filtrar para asaltos
+lon_filter_rob <- lon_full %>%
+  dplyr::filter(Crime.type == "Robbery") %>%
+  dplyr::select(Month, Longitude, Latitude)
+# Otra depuracion
+rm(lon_full)
+# Cambiar nombres para acoplar bases
+names(lon_filter_bici) <- c("FECHA", "longitude", "latitude")
+names(lon_filter_rob) <- c("FECHA", "longitude", "latitude")
+# Usar solo casos completos
+lon_filter_bici <- lon_filter_bici[complete.cases(lon_filter_bici),]
+lon_filter_rob <- lon_filter_rob[complete.cases(lon_filter_rob),]
+## Procesamiento con las funciones del paquete
+# Agregar informacion espacial - Distritos y barrios
+lon_filter_bici <- add_spatial_f(lon_filter_bici, londres, "CODIGO_DIV1", "CODIGO_DIV2")
+lon_filter_rob <- add_spatial_f(lon_filter_rob, londres, "CODIGO_DIV1", "CODIGO_DIV2")
+# Agregar informacion de sexo y rango dia
+lon_filter_bici <- simular_variables_adicionales(lon_filter_bici, df_prop_sexo = df_prop_sexo,
+                                             df_prop_rang_dia = df_prop_rang_dia)
+lon_filter_rob <- simular_variables_adicionales(lon_filter_rob, df_prop_sexo = df_prop_sexo,
+                                             df_prop_rang_dia = df_prop_rang_dia)
+# Sintetizar todo en una sola base de datos
+bici_db <- dplyr::bind_rows(lon_filter_bici, bici_db)
+rob_db <- dplyr::bind_rows(lon_filter_rob, rob_db)
+# Transformar columna de fecha en Date
+bici_db$FECHA <- as.Date(paste0(bici_db$FECHA,"-01"))
+rob_db$FECHA <- as.Date(paste0(rob_db$FECHA,"-01"))
+# Depuracion
+rm(lon_filter_bici, lon_filter_rob)
+```
+
+Finalmente, como el primer análisis a realizar será sobre la cantidad
+de delitos cometidos en una localización espacial agregada en una
+fecha determinada (mes), se usaran en algunos puntos la versión
+`data.table` de las bases de datos para agregar y filtrar con facilidad
+
+```{r data_tables_def}
+### Definir los data.tables a usar 
+bici_dt <- data.table::as.data.table(bici_db)
+rob_dt <- data.table::as.data.table(rob_db)
+```
+
+### Analisís exploratorio
+
+Iniciamos con unas series de tiempo para detectar patrones aparentes
+a simple vista
+
+```{r eda_ts_1}
+### Agregar por Fecha - Bicicletas
+bici_dt[,.N,FECHA] %>%
+  ggplot(mapping = aes(x = FECHA, y = N)) +
+  geom_line(color = '#00AFBB', size = 1) +
+  theme_minimal(base_size = 12) +
+  stat_smooth(color = "#e9ecef", fill = "#e9ecef", method = "loess") +
+  theme(legend.title = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        axis.line.x = element_line(color = 'black', lineend = 'round',
+                                   size = 1),
+        axis.ticks.x = element_line(color = 'black', lineend = 'round',
+                                    size = 1),
+        axis.ticks.length.x = unit(7, 'pt'),
+        axis.title.x = element_text(face = 'bold', size = 13))
+```
+
+```{r eda_ts_2}
+### Agregar por Fecha - Asaltos
+rob_dt[,.N,FECHA] %>%
+  ggplot(mapping = aes(x = FECHA, y = N)) +
+  geom_line(color = '#00AFBB', size = 1) +
+  theme_minimal(base_size = 12) +
+  stat_smooth(color = "#e9ecef", fill = "#e9ecef", method = "loess") +
+  theme(legend.title = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        axis.line.x = element_line(color = 'black', lineend = 'round',
+                                   size = 1),
+        axis.ticks.x = element_line(color = 'black', lineend = 'round',
+                                    size = 1),
+        axis.ticks.length.x = unit(7, 'pt'),
+        axis.title.x = element_text(face = 'bold', size = 13))
+```
+Tenemos unos patrones como **trend** y estacionalidad pronunciados.
+Los confirmamos por medio de unas gráficas de descomposición de 
+la series usando LOESS. No obstante los datoa antes de 2018 parecen estar
+mal.
+
+```{r eda_loess_1}
+bici_dt[,.N,FECHA] %>%
+  select(N) %>%
+  stats::ts(start = c(year(min(bici_dt$FECHA)),month(min(bici_dt$FECHA))),
+     end = c(year(max(bici_dt$FECHA)),month(max(bici_dt$FECHA))),
+     frequency = 12) %>%
+  as.vector() %>%
+  stats::ts(start = c(year(min(bici_dt$FECHA)),month(min(bici_dt$FECHA))),
+     end = c(year(max(bici_dt$FECHA)),month(max(bici_dt$FECHA))),
+     frequency = 12) %>%
+  stats::stl(t.window = 13, s.window = "periodic",robust = TRUE) %>%
+  forecast::autoplot()
+```
+
+```{r eda_loess_2}
+rob_dt[,.N,FECHA] %>%
+  select(N) %>%
+  stats::ts(start = c(year(min(rob_dt$FECHA)),month(min(rob_dt$FECHA))),
+     end = c(year(max(rob_dt$FECHA)),month(max(rob_dt$FECHA))),
+     frequency = 12) %>%
+  as.vector() %>%
+  stats::ts(start = c(year(min(rob_dt$FECHA)),month(min(rob_dt$FECHA))),
+     end = c(year(max(rob_dt$FECHA)),month(max(rob_dt$FECHA))),
+     frequency = 12) %>%
+  stats::stl(t.window = 13, s.window = "periodic",robust = TRUE) %>%
+  forecast::autoplot()
+```
+Con una visión más clara nos interesa ver las funciones de
+autocorrelación completas y parciales, necesarias para el 
+diagnostico temprano de las series temporales lineales aditivas
+```{r eda_acf_1}
+### ACF para hurto de bicicletas
+ciline <- qnorm((1 - 0.95)/2)/sqrt(72)
+bici_dt[,.N,FECHA] %>%
+  select(N) %>%
+  acf(plot = FALSE) %>%
+  with(data.frame(lag, acf)) %>%
+  ggplot(mapping = aes(x = lag, y = acf)) +
+  geom_hline(aes(yintercept = 0)) +
+  geom_segment(mapping = aes(xend = lag, yend = 0)) +
+  geom_hline(aes(yintercept = ciline), linetype = 2, color = 'darkblue') +
+  geom_hline(aes(yintercept = -ciline), linetype = 2, color = 'darkblue') +
+  ylab("") +
+  theme_minimal(base_size = 12) +
+  theme(legend.title = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        axis.ticks.x = element_line(color = 'black', lineend = 'round',
+                                    size = 1),
+        axis.ticks.length.x = unit(7, 'pt'),
+        axis.title.x = element_text(face = 'bold', size = 13))
+```
+
+```{r eda_pacf_1}
+### PACF para hurto de bicicletas
+bici_dt[,.N,FECHA] %>%
+  select(N) %>%
+  pacf(plot = FALSE) %>%
+  with(data.frame(lag, acf)) %>%
+  ggplot(mapping = aes(x = lag, y = acf)) +
+  geom_hline(aes(yintercept = 0)) +
+  geom_segment(mapping = aes(xend = lag, yend = 0)) +
+  geom_hline(aes(yintercept = ciline), linetype = 2, color = 'darkblue') +
+  geom_hline(aes(yintercept = -ciline), linetype = 2, color = 'darkblue') +
+  ylab("") +
+  theme_minimal(base_size = 12) +
+  theme(legend.title = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        axis.ticks.x = element_line(color = 'black', lineend = 'round',
+                                    size = 1),
+        axis.ticks.length.x = unit(7, 'pt'),
+        axis.title.x = element_text(face = 'bold', size = 13))
+```
+
+```{r eda_acf_2}
+### ACF para asaltos
+rob_dt[,.N,FECHA] %>%
+  select(N) %>%
+  acf(plot = FALSE) %>%
+  with(data.frame(lag, acf)) %>%
+  ggplot(mapping = aes(x = lag, y = acf)) +
+  geom_hline(aes(yintercept = 0)) +
+  geom_segment(mapping = aes(xend = lag, yend = 0)) +
+  geom_hline(aes(yintercept = ciline), linetype = 2, color = 'darkblue') +
+  geom_hline(aes(yintercept = -ciline), linetype = 2, color = 'darkblue') +
+  ylab("") +
+  theme_minimal(base_size = 12) +
+  theme(legend.title = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        axis.ticks.x = element_line(color = 'black', lineend = 'round',
+                                    size = 1),
+        axis.ticks.length.x = unit(7, 'pt'),
+        axis.title.x = element_text(face = 'bold', size = 13))
+```
+
+```{r eda_pacf_2}
+### PACF para asaltos
+rob_dt[,.N,FECHA] %>%
+  select(N) %>%
+  pacf(plot = FALSE) %>%
+  with(data.frame(lag, acf)) %>%
+  ggplot(mapping = aes(x = lag, y = acf)) +
+  geom_hline(aes(yintercept = 0)) +
+  geom_segment(mapping = aes(xend = lag, yend = 0)) +
+  geom_hline(aes(yintercept = ciline), linetype = 2, color = 'darkblue') +
+  geom_hline(aes(yintercept = -ciline), linetype = 2, color = 'darkblue') +
+  ylab("") +
+  theme_minimal(base_size = 12) +
+  theme(legend.title = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        axis.ticks.x = element_line(color = 'black', lineend = 'round',
+                                    size = 1),
+        axis.ticks.length.x = unit(7, 'pt'),
+        axis.title.x = element_text(face = 'bold', size = 13))
+```
+Para no extender el análisis exploratorio se presentará finalmente
+el patrón de ocurrencia que se observo en los no reportes 
+(observaciones faltantes) en ciertas unidades temporales para el
+nivel de agregación de barrios. Se omite este análisis con distritos 
+pues no se detecto a dicho nivel fecha alguna que no reportaran
+delitos.
+
+```{r eda_missing_1a}
+### Para bicicletas
+c_dist_neig <- bici_dt[,.N,.(FECHA,CODIGO_DIV1,CODIGO_DIV2)]
+c_neig_fill <- fill_long(c_dist_neig$N, c_dist_neig[,.(FECHA,CODIGO_DIV2)],
+                         date_col = "FECHA", time_delta = "1 month", fill = 0)
+c_neig_fill$y[c_neig_fill$y == 0] <- NA
+# Por barrios - Completo
+c_neig_fill %>%
+  tidyr::pivot_longer(-c(y,FECHA), names_to = "key", values_to = "value") %>%
+  dplyr::mutate(is_missing = is.na(y)) %>%
+  ggplot2::ggplot(ggplot2::aes(as.numeric(value), FECHA, fill = is_missing)) +
+  ggplot2::geom_tile(alpha = 0.6) +
+  ggplot2::scale_fill_manual(name = "",
+                             values = c("blue", "red"),
+                             labels = c("Presente", "Ausente")) +
+  ggplot2::xlab("Vecindario") +
+  ggplot2::ylab("Fecha") +
+  ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 90)) +
+  ggplot2::theme_bw() +
+  ggplot2::coord_flip()
+```
+
+```{r eda_missing_1b}
+### Para bicicletas
+# Por barrios - Agregado de faltantes en meses
+c_neig_fill %>%
+  tidyr::pivot_longer(-c(y,FECHA), names_to = "key", values_to = "value") %>%
+  dplyr::mutate(is_missing = is.na(y)) %>%
+  dplyr::group_by(FECHA) %>%
+  dplyr::summarise(n_missing = sum(is_missing)) %>%
+  ggplot2::ggplot(ggplot2::aes(FECHA, n_missing)) +
+  ggplot2::geom_line() +
+  ggplot2::xlab("Fecha") +
+  ggplot2::ylab("N. perdidos") +
+  ggplot2::theme_bw()
+```
+
+```{r eda_missing_2a}
+### Para asaltos
+c_dist_neig <- rob_dt[,.N,.(FECHA,CODIGO_DIV1,CODIGO_DIV2)]
+c_neig_fill <- fill_long(c_dist_neig$N, c_dist_neig[,.(FECHA,CODIGO_DIV2)],
+                         date_col = "FECHA", time_delta = "1 month", fill = 0)
+c_neig_fill$y[c_neig_fill$y == 0] <- NA
+# Por barrios - Completo
+c_neig_fill %>%
+  tidyr::pivot_longer(-c(y,FECHA), names_to = "key", values_to = "value") %>%
+  dplyr::mutate(is_missing = is.na(y)) %>%
+  ggplot2::ggplot(ggplot2::aes(as.numeric(value), FECHA, fill = is_missing)) +
+  ggplot2::geom_tile(alpha = 0.6) +
+  ggplot2::scale_fill_manual(name = "",
+                             values = c("blue", "red"),
+                             labels = c("Presente", "Ausente")) +
+  ggplot2::xlab("Vecindario") +
+  ggplot2::ylab("Fecha") +
+  ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 90)) +
+  ggplot2::theme_bw() +
+  ggplot2::coord_flip()
+```
+
+```{r eda_missing_2b}
+### Para asaltos
+# Por barrios - Agregado de faltantes en meses
+c_neig_fill %>%
+  tidyr::pivot_longer(-c(y,FECHA), names_to = "key", values_to = "value") %>%
+  dplyr::mutate(is_missing = is.na(y)) %>%
+  dplyr::group_by(FECHA) %>%
+  dplyr::summarise(n_missing = sum(is_missing)) %>%
+  ggplot2::ggplot(ggplot2::aes(FECHA, n_missing)) +
+  ggplot2::geom_line() +
+  ggplot2::xlab("Fecha") +
+  ggplot2::ylab("N. perdidos") +
+  ggplot2::theme_bw()
+```
+Por los extraños patrones mostrados en el conjunto de datos de asaltos se procede
+a eliminar todos los datos previos a 2018, pues podrían perjudicar el poder
+predictivo de los modelos obtenidos.
+
+```{r drop_obs_b}
+# Toda las fechas posteriores al primero de enero
+rob_dt <- rob_dt[FECHA > as.Date("2018-01-01")]
+```
+
+### Modelos
+
+Para esta sección se exploraran los modelos de benchmark inicialmente
+propuestos, uno lineal con inclusión de la variables respuesta
+rezagada, otro con modelos ARIMA y uno finalmente ARIMAX.
+
+#### Modelo líneal
+
+```{r mod_lin_1a, results='hide', message=FALSE}
+### Modelos de regresion lineal - Hurto de bicicletas
+# Creacion de los conjuntos de datos tratados
+db_1a <- as.data.frame(bici_dt[,.N,.(FECHA, CODIGO_DIV1)])
+db_1a <- fill_long(db_1a$N, subset(db_1a, select = -N),
+                  date_col = "FECHA", time_delta = "1 month")
+db_dates_a  <- db_1a$FECHA
+db_1a <- add_date_split(db_1a, "FECHA", week = FALSE, day_range = FALSE,
+                       week_day = FALSE)
+db_1a$ANNO <- as.numeric(db_1a$ANNO)
+fct_split_db_1a <- split_by_factors(db_1a, "CODIGO_DIV1")
+# El _1 hace mencion a los grupos sin componentes AR
+Y_1a <- db_1a$y
+X_1a <- subset(db_1a, select = -y)
+# El _2 hace mencion a los grupos aumentados por AR
+Y_2a <- unlist(lapply(fct_split_db_1a, function(z) tail(z$y,-6)))
+X_2a <- lapply(fct_split_db_1a, function(z){
+  Y <- z$y
+  X <- subset(z, select = -y)
+  data_aug <- add_laggs(X = X, Y = Y, p = 6)
+  data_aug}) %>% dplyr::bind_rows()
+# Los splits basados en cada sub-conjunto
+split_1a <- create_split_long(Y = Y_1a, X = X_1a, split_prop = c(0.7,0.15,0.15),
+                             factors = "CODIGO_DIV1")
+split_2a <- create_split_long(Y = Y_2a, X = X_2a, split_prop = c(0.7,0.15,0.15),
+                             factors = "CODIGO_DIV1")
+# Los modelos lineales propuestos
+mod_lin_1a <- lin_mod_selector(split_1a)
+mod_lin_2a <- lin_mod_selector(split_2a)
+```
+
+```{r mod_lin_1b}
+### Seleccion de modelo
+# Rendimiento en validacion
+c(mod_lin_2a$rmse_val, mod_lin_1a$rmse_val)
+### Se elige el modelo dos 
+### Otras medidas de rendimiento del modelo 2
+linmod_metrics(mod_lin_2a$selected_model, split_2a, "train", "all")
+linmod_metrics(mod_lin_2a$selected_model, split_2a, "validation", "all")
+```
+De acuerdo con la comparación relativa entre el RMSE de la predicción
+un paso adelante en validación y la desviación estándar de la 
+variable respuesta en ese mismo conjunto, el ajuste final propuesto
+tiene falencias en alcanzar un buen poder predictivo. En cualquier
+caso, el resumen del modelo es el siguiente
+```{r mod_lin_1c}
+### Resumen
+summary(mod_lin_2a$selected_model)
+```
+De la anterior salida se pueden rescatar los siguientes puntos:
+- Las variables rezagadas tienen un efecto que en principio parece poco influyente pero se recuerda que la variable asociada (rezagada 
+uno a cinco meses) son conteos que pueden ir desde cantidades pequeñas
+a grandes. En este orden de ideas, el periodo inmediatamente anterior
+y el de los cinco meses previos son los más influyentes, aunque 
+estos tienen efectos antagonistas sobre el valor final de la predicción.
+- De los meses se puede observar que en su mayoría son significativos, aquellos con los que inicia el año (enero y febrero) y con los que termina (noviembre y diciembre) decrecen los conteos esperados. Por otro lado, los meses de mitad de año (junio y julio) son los que más aportan al valor pronosticado.
+- Ciertos distritos tienen un valor base de delitos significativos,
+no obstante no son demasiado diferentes entre sí.
+- El año tiene un coeficiente grande, indicando una tendencia al alza
+con el pasar del tiempo. Se plantea la hipótesis que este enmascara los efectos de las demás variables y se recomienda el tratarlo como **factor** bajo ciertas consideraciones.
+
+```{r mod_lin_2a, results='hide', message=FALSE}
+### Modelos de regresion lineal - Asaltos
+# Creacion de los conjuntos de datos tratados
+db_1b <- as.data.frame(rob_dt[,.N,.(FECHA, CODIGO_DIV1)])
+db_1b <- fill_long(db_1b$N, subset(db_1b, select = -N),
+                  date_col = "FECHA", time_delta = "1 month")
+db_dates_b <- db_1b$FECHA
+db_1b <- add_date_split(db_1b, "FECHA", week = FALSE, day_range = FALSE,
+                       week_day = FALSE, rm_date = TRUE)
+db_1b$ANNO <- as.numeric(db_1b$ANNO)
+fct_split_db_1b <- split_by_factors(db_1b, "CODIGO_DIV1")
+# El _1 hace mencion a los grupos sin componentes AR
+Y_1b <- db_1b$y
+X_1b <- subset(db_1b, select = -y)
+# El _2 hace mencion a los grupos aumentados por AR
+Y_2b <- unlist(lapply(fct_split_db_1b, function(z) tail(z$y,-6)))
+X_2b <- lapply(fct_split_db_1b, function(z){
+  Y <- z$y
+  X <- subset(z, select = -y)
+  data_aug <- add_laggs(X = X, Y = Y, p = 6)
+  data_aug}) %>% dplyr::bind_rows()
+# Los splits basados en cada sub-conjunto
+split_1b <- create_split_long(Y = Y_1b, X = X_1b, split_prop = c(0.7,0.15,0.15),
+                             factors = "CODIGO_DIV1")
+split_2b <- create_split_long(Y = Y_2b, X = X_2b, split_prop = c(0.7,0.15,0.15),
+                             factors = "CODIGO_DIV1")
+# Los modelos lineales propuestos
+mod_lin_1b <- lin_mod_selector(split_1b)
+mod_lin_2b <- lin_mod_selector(split_2b)
+```
+
+```{r mod_lin_2b}
+### Seleccion de modelo
+# Rendimiento en validacion
+c(mod_lin_2b$rmse_val, mod_lin_1b$rmse_val)
+### Se elige el modelo dos 
+### Otras medidas de rendimiento del modelo 2
+linmod_metrics(mod_lin_1b$selected_model, split_2b, "train", "all")
+linmod_metrics(mod_lin_1b$selected_model, split_2b, "validation", "all")
+```
+De acuerdo con la comparación relativa entre el RMSE de la predicción
+un paso adelante en validación y la desviación estándar de la 
+variable respuesta en ese mismo conjunto, el ajuste final propuesto
+tiene grandes falencias. En cualquier caso, el resumen del modelo es el siguiente
+```{r mod_lin_2c}
+### Resumen
+summary(mod_lin_1b$selected_model)
+```
+De la anterior salida se pueden rescatar los siguientes puntos:
+- Ninguna variable rezagada fue incluida en el modelo.
+- De los meses se puede observar que en su mayoría son significativos, todos partiendo de una media positiva
+- Ciertos distritos tienen un valor base de delitos significativos,
+no obstante no son demasiado diferentes entre sí.
+- El año tiene un coeficiente grande, indicando una tendencia al alza
+con el pasar del tiempo. Se plantea la hipótesis que este enmascara los efectos de las demás variables y se recomienda el tratarlo como **factor** bajo ciertas consideraciones.
+- De no ser por el año, todo el modelo se reduciría a una predicción por valor medio según la combinación apropiada de factores.
+
+#### Modelo ARIMA
+
+Se inicia con los modelos ARIMA para los hurtos de bicicleta
+
+```{r mod_arima_1, warning=FALSE}
+### Modelos ARIMA - Hurto de bicicletas
+# Adicionar fechas
+X_3a <- X_1a
+X_3a$FECHA <- tsibble::yearmonth(db_dates_a)
+# Creamos el db agregado por fechas
+split_3a <- create_split_long(Y = Y_1a, X = X_3a, factors = "CODIGO_DIV1",
+                             split_prop = c(0.7,0.15,0.15))
+# Correr los modelos independientes
+mod_arima_a <- arima_mod_selector(split_3a, dates_col = NULL, factor_split = "CODIGO_DIV1")
+# El rmse completo seria
+sqrt(mean(sapply(mod_arima_a$models, function(x){x$rmse_val})^2))
+# Los resumenes
+dump <- lapply(mod_arima_a$models,function(x)fabletools::report(x$model))
+# Las medidas de rendimiento
+metricas_a <- arima_metrics(mod_arima_a, split_3a, factor_split = "CODIGO_DIV1")
+head(metricas_a)
+```
+En general se obtiene una mejora en el uso de modelos individuales
+ARIMA respecto al modelo lineal unificado para los hurtos de 
+bicicletas. Revisando las métricas del rendimiento del modelo
+se observa en principio que el RMSE es cercano a la desviación
+estándar de la variable respuesta en validación.
+
+Terminado el análisis del anterior conjunto se procede con el de 
+asaltos
+
+```{r mod_arima_2, warning=FALSE}
+### Modelos ARIMA - Asaltos
+# Adicionar fechas
+X_3b <- X_1b
+X_3b$FECHA <- tsibble::yearmonth(db_dates_b)
+# Creamos el db agregado por fechas
+split_3b <- create_split_long(Y = Y_1b, X = X_3b, factors = "CODIGO_DIV1",
+                             split_prop = c(0.7,0.15,0.15))
+# Correr los modelos independientes
+mod_arima_b <- arima_mod_selector(split_3b, dates_col = NULL, factor_split = "CODIGO_DIV1")
+# El rmse completo seria
+sqrt(mean(sapply(mod_arima_b$models, function(x){x$rmse_val})^2))
+# Los resumenes
+dump <- lapply(mod_arima_b$models,function(x)fabletools::report(x$model))
+# Las medidas de rendimiento
+metricas_b <- arima_metrics(mod_arima_b, split_3b, factor_split = "CODIGO_DIV1")
+head(metricas_b)
+```
+
+En los primeros modelos se observa un patrón claro y es que todas
+las medidas de rendimiento dan valores muy grandes, que por su
+naturaleza es una mala señal. Además, se puede observar la 
+desproporción entre el RMSE y la desviación estándar de la variable
+observada, llegando a ser hasta 8 veces dicha cantidad.
+
+#### Modelo ARIMAX
+
+```{r mod_arimax_1a, warning=FALSE}
+### Modelos ARIMAX - Hurto de bicicletas
+# Se usa el split_3a
+# Correr los modelos independientes
+mod_arimax_a <- arimax_mod_selector(split_3a, xreg_cols = "ANNO", 
+                                    fourier_K = NULL,
+                                    dates_col = "FECHA", 
+                                    factor_split = "CODIGO_DIV1")
+# El rmse completo seria
+sqrt(mean(sapply(mod_arimax_a$models, function(x){x$rmse_val})^2))
+# Los resumenes
+dump <- lapply(mod_arimax_a$models,function(x)fabletools::report(x$model))
+# Las medidas de rendimiento
+metricasx_a <- arimax_metrics(mod_arimax_a,split_3a,"ANNO",
+                              dates_col = "FECHA",factor_split = "CODIGO_DIV1")
+head(metricasx_a)
+```
+
+```{r mod_arimax_1b, warning=FALSE}
+### Modelos ARIMAX - Hurto de bicicletas
+# Se usa el split_3a
+# Correr los modelos independientes
+mod_arimax_b <- arimax_mod_selector(split_3b, xreg_cols = "ANNO", 
+                                    fourier_K = 6,
+                                    dates_col = "FECHA", 
+                                    factor_split = "CODIGO_DIV1")
+# El rmse completo seria
+sqrt(mean(sapply(mod_arimax_b$models, function(x){x$rmse_val})^2))
+# Los resumenes
+dump <- lapply(mod_arimax_b$models,function(x)fabletools::report(x$model))
+# Las medidas de rendimiento
+metricasx_b <- arimax_metrics(mod_arimax_b,split_3b,"ANNO",
+                              dates_col = "FECHA",factor_split = "CODIGO_DIV1")
+head(metricasx_b)
+```
+
+#### Modelo experimental ARIMA + Lineal
+
+Uno de los modelos propuestos consiste en un ajuste preliminar de un modelo
+ARIMA a las series de tiempo objetivo de la cual se obtienen sus residuales
+$$r_{ij}=\hat{y}^{(ARIMA)}_{ij}-y_{ij}, \quad i=1,...,n, \quad j=1,...,m$$
+donde $j$ es el índice de la serie de tiempo obtenida, que en los ejemplos
+tratados previamente corresponde al código de cada uno de los distritos 
+londinenses.
+
+Con la obtención de los residuales $r_{ij}$ se propone un modelo de regresión
+lineal con las características disponibles en anteriores ocasiones para 
+predecir la respuesta pero ahora con el fin de aproximar el residuo de manera
+que el nuevo pronostico de $y_{ij}$ sea
+$$\hat{y}_{ij}=\hat{y}_{ij}^{(ARIMA)}+\hat{r}^{(Reg)}_{ij}$$
+```{r mod_arima_lin_1a, warning=FALSE}
+### Modelos ARIMA/Lineal - Hurto de bicicletas
+# Se usa el split_3a
+# Correr los modelos independientes
+mod_arima_lin_a <- arima_lin_selector(split_out = split_3a,
+                                      factor_split = "CODIGO_DIV1",
+                                      dates_col = "FECHA")
+# El rmse completo seria
+mod_arima_lin_a$rmse_train
+mod_arima_lin_a$rmse_val
+# Los resumenes ARIMA
+dump <- lapply(mod_arima_lin_a$arima_fit,function(x)fabletools::report(x$fit))
+# El resumen de la regresion
+summary(mod_arima_lin_a$lin_fit$selected_model)
+# Las medidas de rendimiento
+arima_lin_metrics(arima_fit = mod_arima_lin_a$arima_fit, 
+                  lin_fit = mod_arima_lin_a$lin_fit,
+                  split_y = split_3a, 
+                  dates_col = "FECHA",
+                  objective = "validation",
+                  "all")
+```
+
+```{r mod_arima_lin_1b, warning=FALSE}
+### Modelos ARIMA/Lineal - Asaltos
+# Se usa el split_3b
+# Correr los modelos independientes
+mod_arima_lin_b <- arima_lin_selector(split_out = split_3b,
+                                      factor_split = "CODIGO_DIV1",
+                                      dates_col = "FECHA")
+# El rmse completo seria
+mod_arima_lin_b$rmse_train
+mod_arima_lin_b$rmse_val
+# Los resumenes ARIMA
+dump <- lapply(mod_arima_lin_b$arima_fit,function(x)fabletools::report(x$fit))
+# El resumen de la regresion
+summary(mod_arima_lin_b$lin_fit$selected_model)
+# Las medidas de rendimiento
+arima_lin_metrics(arima_fit = mod_arima_lin_b$arima_fit, 
+                  lin_fit = mod_arima_lin_b$lin_fit,
+                  split_y = split_3b, 
+                  dates_col = "FECHA",
+                  objective = "validation",                  
+                  "all")
+```
+
+#### Modelo experimental Lineal + ARIMA
+
+Una variante del anterior modelo consiste en invertir el orden de ajuste
+de los modelos lineales y ARIMA, en este caso se tendrá que los residuales
+obtenidos en la primera iteración estan dados por
+$$r_{ij}=\hat{y}^{(Reg)}_{ij}-y_{ij}, \quad i=1,...,n, \quad j=1,...,m$$
+donde $j$ es el índice del factor que dividía las series temporales en el
+anterior caso, acá consiste en el individuo/objeto/localización sobre el cual
+se repiten las mediciones $n$ veces en un espacio regular de tiempo (de tener
+faltantes se completan con ceros). Para diferenciar el modelo lineal
+de una aproximación longitudinal, se usan variable dummy para el control
+de los niveles medios pronosticados. 
+
+Con la obtención de los residuales $r_{ij}$ se proponen diferentes modelos 
+ARIMA con el fin de aproximar el residuo de manera que el nuevo pronostico 
+de $y_{ij}$ sea
+$$\hat{y}_{ij}=\hat{y}_{ij}^{(Reg)}+\hat{r}^{(ARIMA)}_{ij}$$
+
+```{r mod_lin_arima_1a, warning=FALSE}
+### Modelos Lineal/ARIMA - Hurto de bicicletas
+# Se usa el split_3a
+# Correr los modelos independientes
+mod_lin_arima_a <- lin_arima_selector(split_out = split_3a,
+                                      factor_split = "CODIGO_DIV1",
+                                      dates_col = "FECHA")
+# El rmse completo seria
+mod_lin_arima_a$rmse_train
+mod_lin_arima_a$rmse_val
+# Los resumenes ARIMA
+dump <- lapply(mod_lin_arima_a$arima_fit,function(x)fabletools::report(x$fit))
+# El resumen de la regresion
+summary(mod_lin_arima_a$lin_fit$selected_model)
+# Las medidas de rendimiento
+lin_arima_metrics(arima_fit = mod_lin_arima_a$arima_fit, 
+                  lin_fit = mod_lin_arima_a$lin_fit,
+                  split_y = split_3a, 
+                  dates_col = "FECHA",
+                  objective = "validation",
+                  "all")
+```
+
+```{r mod_lin_arima_1b, warning=FALSE}
+### Modelos Lineal/ARIMA - Asaltos
+# Se usa el split_3b
+# Correr los modelos independientes
+mod_lin_arima_b <- lin_arima_selector(split_out = split_3b,
+                                      factor_split = "CODIGO_DIV1",
+                                      dates_col = "FECHA")
+# El rmse completo seria
+mod_lin_arima_b$rmse_train
+mod_lin_arima_b$rmse_val
+# Los resumenes ARIMA
+dump <- lapply(mod_lin_arima_b$arima_fit,function(x)fabletools::report(x$fit))
+# El resumen de la regresion
+summary(mod_lin_arima_b$lin_fit$selected_model)
+# Las medidas de rendimiento
+lin_arima_metrics(arima_fit = mod_lin_arima_b$arima_fit, 
+                  lin_fit = mod_lin_arima_b$lin_fit,
+                  split_y = split_3b, 
+                  dates_col = "FECHA",
+                  objective = "validation",
+                  "all")
+```

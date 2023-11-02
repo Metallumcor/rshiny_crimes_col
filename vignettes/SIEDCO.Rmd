@@ -1,0 +1,484 @@
+---
+title: "SIEDCO - Documentación"
+output: 
+  html_document:
+    standalone: true
+    smart: true
+    normalize: true
+    toc: true
+    highlight: tango
+    self-contained: true
+    theme: cerulean
+  pdf_document:
+    toc: true
+    highlight: tango
+always_allow_html: true
+vignette: >
+  %\VignetteIndexEntry{SIEDCO - Documentación}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+Librerias requeridas en este documento
+
+```{r setup, warning=FALSE,message=FALSE}
+library(test2021)
+library(ggplot2)
+library(dplyr)
+```
+
+La presente viñeta esta dirigida a la descripción del reporte SIEDCO
+\code{siedco_full} de la base de datos de delitos de alto impacto para la ciudad
+de Bogotá entre enero de 2010 y junio de 2021. 
+
+# Reporte de UPZ
+
+La distribución de las UPZ en identificadas contra no identificadas es la 
+siguiente
+
+```{r upz_1, echo=FALSE}
+siedco_full %>%
+  dplyr::mutate(UPZ = dplyr::case_when(UPZ %in% c("-","SIN LOCALIZACION") ~ "No identificada", 
+                TRUE ~ "Identificada")) %>%
+  dplyr::group_by(UPZ) %>%
+  dplyr::summarise(n = n()) %>%
+  dplyr::mutate(Porcentaje = 100*n/sum(n)) %>%
+  dplyr::select(UPZ, Porcentaje) %>%
+  knitr::kable(digits = 3, row.names = FALSE)
+  #ggplot(aes(x = UPZ, fill = UPZ)) +
+  #geom_bar(aes(y = 100*(..count..)/sum(..count..))) +
+  #ylab("Porcentaje") +
+  #xlab("UPZ") +
+  #theme_bw() +
+  #theme(legend.position = "none")
+```
+
+Las localidades con UPZ sin identificar son las siguientes
+
+```{r upz_2, echo=FALSE}
+siedco_full %>%
+  dplyr::mutate(UPZ = dplyr::case_when(UPZ %in% c("-","SIN LOCALIZACION") ~ "No identificada", 
+                TRUE ~ "Identificada")) %>%
+  dplyr::filter(UPZ == "No identificada") %>%
+  dplyr::group_by(Localidad) %>%
+  dplyr::summarise(Absoluto = n()) %>%
+  dplyr::mutate(Porcentaje = 100*Absoluto/sum(Absoluto)) %>%
+  dplyr::select(Localidad, Porcentaje, Absoluto) %>%
+  knitr::kable(digits = 1, row.names = FALSE)
+```
+
+Por otro lado esta es la distribución de UPZ identificadas contra las UPR es
+
+```{r upz_3, echo=FALSE}
+siedco_full %>%
+  dplyr::filter(!UPZ %in% c("-","SIN LOCALIZACION")) %>%
+  dplyr::mutate(UPZ = dplyr::case_when(grepl("UPR",UPZ)  ~ "No rural", 
+                TRUE ~ "Rural")) %>%
+  dplyr::group_by(UPZ) %>%
+  dplyr::summarise(n = n()) %>%
+  dplyr::mutate(Porcentaje = 100*n/sum(n)) %>%
+  dplyr::select(UPZ, Porcentaje) %>%
+  knitr::kable(digits = 3, row.names = FALSE)
+```
+
+# Distribución de reportes 
+
+Los delitos contenidos en la base de datos tienen la siguiente distribución.
+
+*Nota 1:* AT = Atentado terrorista.
+
+*Nota 2:* La definición completa se puede consultar en SIEDCO - PONAL.
+
+*Nota 3:* Para estos análisis se consideran los reportes sin localización UPZ.
+
+```{r delito_1, echo=FALSE,warning=FALSE,message=FALSE}
+siedco_copy <- siedco_full
+siedco_copy$Delito[grepl("HURTO DE CELULARES",siedco_copy$Delito)] <- "HURTO DE CELULARES"
+siedco_copy %>%
+  dplyr::group_by(Delito) %>%
+  dplyr::summarise(n = n()) %>%
+  dplyr::mutate(Porcentaje = 100*n/sum(n)) %>%
+  dplyr::select(Delito, Porcentaje) %>%
+  dplyr::arrange(desc(Porcentaje)) %>%
+  knitr::kable(digits = 2, row.names = FALSE)
+```
+
+Integrando los niveles de hurtos de celulares en uno solo, la distribución
+por localidades de los cinco delitos de alto impacto más frecuentes es
+
+```{r delito_2, echo=FALSE,warning=FALSE,message=FALSE}
+top_5 <- siedco_copy %>%
+  dplyr::group_by(Delito) %>%
+  dplyr::summarise(n = n()) %>%
+  dplyr::mutate(Porcentaje = 100*n/sum(n)) %>%
+  dplyr::select(Delito, Porcentaje) %>%
+  dplyr::arrange(desc(Porcentaje)) %>%
+  head(5)
+temp <- siedco_copy %>%
+  dplyr::group_by(Delito) %>%
+  dplyr::filter(Delito %in% top_5$Delito) %>%
+  dplyr::group_by(Localidad,Delito) %>%
+  dplyr::summarise(n = n()) %>%
+  tidyr::pivot_wider(id_cols = c(Localidad,Delito), 
+                     names_from = Delito, values_from = n) 
+
+temp[,-1] <- mapply(function(x,y) 100*x/y,x = temp[,-1], y=colSums(temp[,-1]))
+temp %>%
+  knitr::kable(digits = 2, row.names = FALSE)
+```
+
+# Distribución de días sin reportes
+
+Bajo un supuesto de cobertura completa y veracidad de la información se puede
+inferir que los días no considerados dentro de los reportes de delitos para
+una localización especifica se pueden asumir como días con cero ocurrencias,
+dando la posibilidad de aumentar el conjunto de datos con la inserción de 
+dicha información, siempre y cuando tenga sentido.
+
+A continuación se presenta una gráfica que muestra la serie de tiempo agregada
+de totales de reportes para los cinco delitos con mayores ocurrencias. Se
+incluye un código de colores que separa los días contemplados como entrenamiento
+, validación y prueba en una partición 70%/15%/15%.
+
+```{r ceros_1, echo=FALSE,warning=FALSE,message=FALSE}
+zeros <- siedco_copy %>%
+  dplyr::filter(Delito %in% top_5$Delito, 
+                !Localidad %in% c("20 - SUMAPAZ",""),
+                !grepl("UPR",UPZ),
+                !UPZ %in% c("SIN LOCALIZACION","-")) %>%
+  dplyr::mutate(CODIGO_DIV1 = substr(Localidad,1,2))
+```
+
+```{r ceros_2, echo=FALSE,warning=FALSE,message=FALSE}
+del_sel <- top_5$Delito[1]
+temp <- zeros %>%
+  dplyr::filter(Delito == del_sel) %>%
+  dplyr::select(Fecha, CODIGO_DIV1,`Numero Hechos`)
+temp[,y := sum(`Numero Hechos`), .(Fecha,CODIGO_DIV1)]
+temp$`Numero Hechos` <- NULL
+temp <- unique(temp)
+temp <- test2021::fill_long(temp$y, temp[,-"y"],"Fecha")
+#
+split_bogota <- 
+  test2021::create_split_long(temp$y, 
+                              subset(temp,select=-y),
+                              factors = "CODIGO_DIV1",
+                              split_prop = c(0.7,0.15,0.15))
+#
+train <- data.frame(y=split_bogota$Y$Y_train,split_bogota$X$X_train,part = "train")
+val <- data.frame(y=split_bogota$Y$Y_val,split_bogota$X$X_val,part = "val")
+test <- data.frame(y=split_bogota$Y$Y_test,split_bogota$X$X_test,part = "test")
+#
+full_set <- bind_rows(list(train,val,test))
+full_set %>%
+  dplyr::group_by(Fecha,part) %>%
+  summarise(n = sum(y)) %>%
+  ggplot(aes(x  = Fecha, y = n, color = part)) +
+  geom_line() +
+  theme_bw() +
+  labs(color = "Sección", y = "Reportes") +
+  ggtitle(del_sel)
+```
+
+```{r ceros_3, echo=FALSE,warning=FALSE,message=FALSE}
+del_sel <- top_5$Delito[2]
+temp <- zeros %>%
+  dplyr::filter(Delito == del_sel) %>%
+  dplyr::select(Fecha, CODIGO_DIV1,`Numero Hechos`)
+temp[,y := sum(`Numero Hechos`), .(Fecha,CODIGO_DIV1)]
+temp$`Numero Hechos` <- NULL
+temp <- unique(temp)
+temp <- test2021::fill_long(temp$y, temp[,-"y"],"Fecha")
+#
+split_bogota <- 
+  test2021::create_split_long(temp$y, 
+                              subset(temp,select=-y),
+                              factors = "CODIGO_DIV1",
+                              split_prop = c(0.7,0.15,0.15))
+#
+train <- data.frame(y=split_bogota$Y$Y_train,split_bogota$X$X_train,part = "train")
+val <- data.frame(y=split_bogota$Y$Y_val,split_bogota$X$X_val,part = "val")
+test <- data.frame(y=split_bogota$Y$Y_test,split_bogota$X$X_test,part = "test")
+#
+full_set <- bind_rows(list(train,val,test))
+full_set %>%
+  dplyr::group_by(Fecha,part) %>%
+  summarise(n = sum(y)) %>%
+  ggplot(aes(x  = Fecha, y = n, color = part)) +
+  geom_line() +
+  theme_bw() +
+  labs(color = "Sección", y = "Reportes") +
+  ggtitle(del_sel)
+```
+
+```{r ceros_4, echo=FALSE,warning=FALSE,message=FALSE}
+del_sel <- top_5$Delito[3]
+temp <- zeros %>%
+  dplyr::filter(Delito == del_sel) %>%
+  dplyr::select(Fecha, CODIGO_DIV1,`Numero Hechos`)
+temp[,y := sum(`Numero Hechos`), .(Fecha,CODIGO_DIV1)]
+temp$`Numero Hechos` <- NULL
+temp <- unique(temp)
+temp <- test2021::fill_long(temp$y, temp[,-"y"],"Fecha")
+#
+split_bogota <- 
+  test2021::create_split_long(temp$y, 
+                              subset(temp,select=-y),
+                              factors = "CODIGO_DIV1",
+                              split_prop = c(0.7,0.15,0.15))
+#
+train <- data.frame(y=split_bogota$Y$Y_train,split_bogota$X$X_train,part = "train")
+val <- data.frame(y=split_bogota$Y$Y_val,split_bogota$X$X_val,part = "val")
+test <- data.frame(y=split_bogota$Y$Y_test,split_bogota$X$X_test,part = "test")
+#
+full_set <- bind_rows(list(train,val,test))
+full_set %>%
+  dplyr::group_by(Fecha,part) %>%
+  summarise(n = sum(y)) %>%
+  ggplot(aes(x  = Fecha, y = n, color = part)) +
+  geom_line() +
+  theme_bw() +
+  labs(color = "Sección", y = "Reportes") +
+  ggtitle(del_sel)
+```
+
+```{r ceros_5, echo=FALSE,warning=FALSE,message=FALSE}
+del_sel <- top_5$Delito[4]
+temp <- zeros %>%
+  dplyr::filter(Delito == del_sel) %>%
+  dplyr::select(Fecha, CODIGO_DIV1,`Numero Hechos`)
+temp[,y := sum(`Numero Hechos`), .(Fecha,CODIGO_DIV1)]
+temp$`Numero Hechos` <- NULL
+temp <- unique(temp)
+temp <- test2021::fill_long(temp$y, temp[,-"y"],"Fecha")
+#
+split_bogota <- 
+  test2021::create_split_long(temp$y, 
+                              subset(temp,select=-y),
+                              factors = "CODIGO_DIV1",
+                              split_prop = c(0.7,0.15,0.15))
+#
+train <- data.frame(y=split_bogota$Y$Y_train,split_bogota$X$X_train,part = "train")
+val <- data.frame(y=split_bogota$Y$Y_val,split_bogota$X$X_val,part = "val")
+test <- data.frame(y=split_bogota$Y$Y_test,split_bogota$X$X_test,part = "test")
+#
+full_set <- bind_rows(list(train,val,test))
+full_set %>%
+  dplyr::group_by(Fecha,part) %>%
+  summarise(n = sum(y)) %>%
+  ggplot(aes(x  = Fecha, y = n, color = part)) +
+  geom_line() +
+  theme_bw() +
+  labs(color = "Sección", y = "Reportes") +
+  ggtitle(del_sel)
+```
+
+```{r ceros_6, echo=FALSE,warning=FALSE,message=FALSE}
+del_sel <- top_5$Delito[5]
+temp <- zeros %>%
+  dplyr::filter(Delito == del_sel) %>%
+  dplyr::select(Fecha, CODIGO_DIV1,`Numero Hechos`)
+temp[,y := sum(`Numero Hechos`), .(Fecha,CODIGO_DIV1)]
+temp$`Numero Hechos` <- NULL
+temp <- unique(temp)
+temp <- test2021::fill_long(temp$y, temp[,-"y"],"Fecha")
+#
+split_bogota <- 
+  test2021::create_split_long(temp$y, 
+                              subset(temp,select=-y),
+                              factors = "CODIGO_DIV1",
+                              split_prop = c(0.7,0.15,0.15))
+#
+train <- data.frame(y=split_bogota$Y$Y_train,split_bogota$X$X_train,part = "train")
+val <- data.frame(y=split_bogota$Y$Y_val,split_bogota$X$X_val,part = "val")
+test <- data.frame(y=split_bogota$Y$Y_test,split_bogota$X$X_test,part = "test")
+#
+full_set <- bind_rows(list(train,val,test))
+full_set %>%
+  dplyr::group_by(Fecha,part) %>%
+  summarise(n = sum(y)) %>%
+  ggplot(aes(x  = Fecha, y = n, color = part)) +
+  geom_line() +
+  theme_bw() +
+  labs(color = "Sección", y = "Reportes") +
+  ggtitle(del_sel)
+```
+
+De las anteriores visualizaciones se destaca en primer lugar la perdida sistemática de 
+registros entre junio y diciembre del año 2020, no obstante, dicha perdida de
+información no afecta directamente los conjuntos entrenamiento y/o validación.
+
+Además, se destaca el aumento sostenido de reportes en la última mitad la
+década anterior.
+
+Ahora se muestra la distribución de una clase de no reportes contra
+uno o más reportes, a través de las particiones completadas con
+la inclusión de ceros
+
+```{r ceros_7, echo=FALSE,warning=FALSE,message=FALSE}
+del_sel <- top_5$Delito[1]
+temp <- zeros %>%
+  dplyr::filter(Delito == del_sel) %>%
+  dplyr::select(Fecha, CODIGO_DIV1,`Numero Hechos`)
+temp[,y := sum(`Numero Hechos`), .(Fecha,CODIGO_DIV1)]
+temp$`Numero Hechos` <- NULL
+temp <- unique(temp)
+temp <- test2021::fill_long(temp$y, temp[,-"y"],"Fecha")
+#
+split_bogota <- 
+  test2021::create_split_long(temp$y, 
+                              subset(temp,select=-y),
+                              factors = "CODIGO_DIV1",
+                              split_prop = c(0.7,0.15,0.15))
+#
+train <- data.frame(y=split_bogota$Y$Y_train,split_bogota$X$X_train,part = "train")
+val <- data.frame(y=split_bogota$Y$Y_val,split_bogota$X$X_val,part = "val")
+test <- data.frame(y=split_bogota$Y$Y_test,split_bogota$X$X_test,part = "test")
+#
+full_set <- bind_rows(list(train,val,test))
+full_set %>%
+  dplyr::mutate(Categoria = dplyr::case_when(y == 0 ~ "Sin ocurrencias",
+                                             TRUE ~ "Con ocurrencias")) %>%
+  dplyr::group_by(part,Categoria) %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::mutate(Porcentaje = 100*n/sum(n), Particion = part) %>%
+  dplyr::select(Particion, Categoria, Porcentaje) %>%
+  knitr::kable(digits = 2, row.names = FALSE,
+               caption = paste("Distribución para",del_sel))
+```
+
+```{r ceros_8, echo=FALSE,warning=FALSE,message=FALSE}
+del_sel <- top_5$Delito[2]
+temp <- zeros %>%
+  dplyr::filter(Delito == del_sel) %>%
+  dplyr::select(Fecha, CODIGO_DIV1,`Numero Hechos`)
+temp[,y := sum(`Numero Hechos`), .(Fecha,CODIGO_DIV1)]
+temp$`Numero Hechos` <- NULL
+temp <- unique(temp)
+temp <- test2021::fill_long(temp$y, temp[,-"y"],"Fecha")
+#
+split_bogota <- 
+  test2021::create_split_long(temp$y, 
+                              subset(temp,select=-y),
+                              factors = "CODIGO_DIV1",
+                              split_prop = c(0.7,0.15,0.15))
+#
+train <- data.frame(y=split_bogota$Y$Y_train,split_bogota$X$X_train,part = "train")
+val <- data.frame(y=split_bogota$Y$Y_val,split_bogota$X$X_val,part = "val")
+test <- data.frame(y=split_bogota$Y$Y_test,split_bogota$X$X_test,part = "test")
+#
+full_set <- bind_rows(list(train,val,test))
+full_set %>%
+  dplyr::mutate(Categoria = dplyr::case_when(y == 0 ~ "Sin ocurrencias",
+                                             TRUE ~ "Con ocurrencias"),
+                 Particion = part) %>%
+  dplyr::group_by(Particion,Categoria) %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::mutate(Porcentaje = 100*n/sum(n)) %>%
+  dplyr::select(Particion, Categoria, Porcentaje) %>%
+  knitr::kable(digits = 2, row.names = FALSE,
+               caption = paste("Distribución para",del_sel))
+```
+
+```{r ceros_9, echo=FALSE,warning=FALSE,message=FALSE}
+del_sel <- top_5$Delito[3]
+temp <- zeros %>%
+  dplyr::filter(Delito == del_sel) %>%
+  dplyr::select(Fecha, CODIGO_DIV1,`Numero Hechos`)
+temp[,y := sum(`Numero Hechos`), .(Fecha,CODIGO_DIV1)]
+temp$`Numero Hechos` <- NULL
+temp <- unique(temp)
+temp <- test2021::fill_long(temp$y, temp[,-"y"],"Fecha")
+#
+split_bogota <- 
+  test2021::create_split_long(temp$y, 
+                              subset(temp,select=-y),
+                              factors = "CODIGO_DIV1",
+                              split_prop = c(0.7,0.15,0.15))
+#
+train <- data.frame(y=split_bogota$Y$Y_train,split_bogota$X$X_train,part = "train")
+val <- data.frame(y=split_bogota$Y$Y_val,split_bogota$X$X_val,part = "val")
+test <- data.frame(y=split_bogota$Y$Y_test,split_bogota$X$X_test,part = "test")
+#
+full_set <- bind_rows(list(train,val,test))
+full_set %>%
+  dplyr::mutate(Categoria = dplyr::case_when(y == 0 ~ "Sin ocurrencias",
+                                             TRUE ~ "Con ocurrencias"),                         Particion = part) %>%
+  dplyr::group_by(Particion,Categoria)  %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::mutate(Porcentaje = 100*n/sum(n)) %>%
+  dplyr::select(Particion, Categoria, Porcentaje) %>%
+  knitr::kable(digits = 2, row.names = FALSE,
+               caption = paste("Distribución para",del_sel))
+```
+
+```{r ceros_10, echo=FALSE,warning=FALSE,message=FALSE}
+del_sel <- top_5$Delito[4]
+temp <- zeros %>%
+  dplyr::filter(Delito == del_sel) %>%
+  dplyr::select(Fecha, CODIGO_DIV1,`Numero Hechos`)
+temp[,y := sum(`Numero Hechos`), .(Fecha,CODIGO_DIV1)]
+temp$`Numero Hechos` <- NULL
+temp <- unique(temp)
+temp <- test2021::fill_long(temp$y, temp[,-"y"],"Fecha")
+#
+split_bogota <- 
+  test2021::create_split_long(temp$y, 
+                              subset(temp,select=-y),
+                              factors = "CODIGO_DIV1",
+                              split_prop = c(0.7,0.15,0.15))
+#
+train <- data.frame(y=split_bogota$Y$Y_train,split_bogota$X$X_train,part = "train")
+val <- data.frame(y=split_bogota$Y$Y_val,split_bogota$X$X_val,part = "val")
+test <- data.frame(y=split_bogota$Y$Y_test,split_bogota$X$X_test,part = "test")
+#
+full_set <- bind_rows(list(train,val,test))
+full_set %>%
+  dplyr::mutate(Categoria = dplyr::case_when(y == 0 ~ "Sin ocurrencias",
+                                             TRUE ~ "Con ocurrencias"),                         Particion = part) %>%
+  dplyr::group_by(Particion,Categoria)  %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::mutate(Porcentaje = 100*n/sum(n)) %>%
+  dplyr::select(Particion, Categoria, Porcentaje) %>%
+  knitr::kable(digits = 2, row.names = FALSE,
+               caption = paste("Distribución para",del_sel))
+```
+
+```{r ceros_11, echo=FALSE,warning=FALSE,message=FALSE}
+del_sel <- top_5$Delito[5]
+temp <- zeros %>%
+  dplyr::filter(Delito == del_sel) %>%
+  dplyr::select(Fecha, CODIGO_DIV1,`Numero Hechos`)
+temp[,y := sum(`Numero Hechos`), .(Fecha,CODIGO_DIV1)]
+temp$`Numero Hechos` <- NULL
+temp <- unique(temp)
+temp <- test2021::fill_long(temp$y, temp[,-"y"],"Fecha")
+#
+split_bogota <- 
+  test2021::create_split_long(temp$y, 
+                              subset(temp,select=-y),
+                              factors = "CODIGO_DIV1",
+                              split_prop = c(0.7,0.15,0.15))
+#
+train <- data.frame(y=split_bogota$Y$Y_train,split_bogota$X$X_train,part = "train")
+val <- data.frame(y=split_bogota$Y$Y_val,split_bogota$X$X_val,part = "val")
+test <- data.frame(y=split_bogota$Y$Y_test,split_bogota$X$X_test,part = "test")
+#
+full_set <- bind_rows(list(train,val,test))
+full_set %>%
+  dplyr::mutate(Categoria = dplyr::case_when(y == 0 ~ "Sin ocurrencias",
+                                             TRUE ~ "Con ocurrencias"),                         Particion = part) %>%
+  dplyr::group_by(Particion,Categoria)  %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::mutate(Porcentaje = 100*n/sum(n)) %>%
+  dplyr::select(Particion, Categoria, Porcentaje) %>%
+  knitr::kable(digits = 2, row.names = FALSE,
+               caption = paste("Distribución para",del_sel))
+```

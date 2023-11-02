@@ -1,0 +1,114 @@
+#' @encoding UTF-8
+#'
+#' @title Reportes completos de delitos de alto impacto en la ciudad de Bogotá,
+#'     desde 2010
+#' @description Recopilación de archivos de texto plano (csv) obtenidos de la
+#'     plataforma ORACLE de la Secretaría de seguridad, convivencia y justicia
+#'     de la ciudad de Bogotá D.C. durante el mes de Julio de 2021 siguiendo
+#'     este [enlace](https://scj.gov.co/es/oficina-oaiee/estadisticas-mapas)
+#'     en la sección "Estadísticas y mapas", en el menú "Seguridad" y en la
+#'     opción "Delitos de alto impacto - Ir al informe".
+#'
+#'     La información corresponde a la suministrada por el SIEDCO de la
+#'     Policía Nacional de Colombia desde el primero de enero de 2010 hasta
+#'     el 30 de junio de 2021, dentro de la ciudad de Bogotá incluyendo la
+#'     localidad de Sumapaz, zonas rurales y localizaciones no identificadas.
+#'
+#' @format \code{siedco_full} es un data frame con 1.805.298 filas y  13 columnas
+#'     Cada registro de la base de datos cuenta con las siguiente características
+#'
+#'     \describe{
+#'         \item{Fecha}{La fecha del registró en formato DD/MM/AAAA.}
+#'         \item{Año}{El año númerico del registró.}
+#'         \item{Nro del Mes}{Una numeración del mes del registró, la cual va de
+#'         01 a 12, donde 01 corresponde a enero y 12 a diciembre.}
+#'         \item{Modalidad}{El modo en que ocurrieron los delitos del registró.
+#'         Existen 189 posibilidades.}
+#'         \item{Mes}{Las tres iniciales del mes de registró.}
+#'         \item{Localidad}{El código numérico y el nombre de la localidad donde
+#'         se creó el registró. Son un total de 20 incluyendo a Sumapaz. Los
+#'         códigos corresponden a los asignados por el Distrito de Bogotá.}
+#'         \item{UPZ}{El nombre de la Unidad de planeamiento zonal donde ocurrió
+#'         el registró. Incluye las UPR (unidades de planeamiento rural) de ser
+#'         el caso. Son un total de 150.}
+#'         \item{Delito}{La clasificación otorgada al delito del registró.}
+#'         \item{Sexo}{El sexo de la persona que genera el registró. Pude ser
+#'         "FEMENINO", "MASCULINO" o no reporta "-".}
+#'         \item{Nombre día}{El nombre del día del registró.}
+#'         \item{Rango del día}{El rango horario donde aconteció el registró.
+#'         Puede ser "MADRUGADA", "MAÑANA", "TARDE" o "NOCHE".}
+#'         \item{Arma Empleada}{Arma/s usada/s durante el delito registrado.
+#'         Tiene 46 posibilidades.}
+#'         \item{Número de hechos}{La cantidad de afectados/victimas registradas.}
+#'     }
+#'
+#'     Los datos no presentan duplicados. Existe perdida de información en los
+#'     reportes de UPZ para algunas localidades remplazados con los campos
+#'     " " o "SIN LOCALIZACION".
+#' @source SIEDCO
+"siedco_full"
+
+#' @encoding UTF-8
+#'
+#' @title Reportes completos de delitos de alto impacto en la ciudad de Bogotá,
+#'     desde 2010 - Con coordenadas espaciales
+"siedco_wc"
+
+#' @encoding UTF-8
+#'
+#' @title Reportes de robos de celulares en Bogotá
+#' @source SIEDCO
+"bog_hurto_celulares"
+
+#' @encoding UTF-8
+#'
+#' @title Reportes simulados de robos de bicicletas en Bogotá
+#' @source Elaboración propia
+"bog_hurto_bicicletas"
+
+#' @encoding UTF-8
+#'
+#' @title Reportes simulados de robos de motos en Bogotá
+#' @source Elaboración propia
+"bog_hurto_motos"
+
+#' @encoding UTF-8
+#'
+#' @title Reportes simulados de robos de bicicletas en Medellín
+#' @source Elaboración propia
+"med_hurto_bicicletas"
+
+#' @encoding UTF-8
+#'
+#' @title Reportes de delitos agregados a nivel de municipio.
+#' @name crimcol
+#' @keywords Colombia, Delitos
+#' @source [Datos abiertos - Colombia](https://www.datos.gov.co/browse?q=reporte%20delitos%20dijin&sortBy=relevance)
+"crim_col_extorsion"
+
+#' @rdname crimcol
+"crim_col_homicidios"
+
+#' @rdname crimcol
+"crim_col_hurto_1"
+
+#' @rdname crimcol
+"crim_col_hurto_2"
+
+#' @rdname crimcol
+"crim_col_hurto_3"
+
+#' @rdname crimcol
+"crim_col_lesiones"
+
+#' @rdname crimcol
+"crim_col_secuestro"
+
+#' @rdname crimcol
+"crim_col_sexual"
+
+#' @rdname crimcol
+"crim_col_terrorismo"
+
+#' @rdname crimcol
+"crim_col_vio_intra"
